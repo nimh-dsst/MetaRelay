@@ -115,7 +115,7 @@ and remote changed since → conflict; otherwise write only when changed.
 | | Container hierarchy | Record storage | Preview | Conflict token | Test strategy |
 | --- | --- | --- | --- | --- | --- |
 | **Local** | Directory tree | `{id}.json` + index/history | `{id}.md` sidecar | Content hash | Conformance oracle, always in CI |
-| **LabArchives** | Notebook → directory → page | JSON attachment entry with marker | Text entry | Attachment checksum | Fake tree (lifted from Chronoxiv tests) + recorded cassettes; live smoke when credentials exist |
+| **LabArchives** | Notebook → directory → page | JSON attachment entry with marker | Text entry | Attachment checksum | Stateful fake LabArchives API server (real `labapi` runs against it) + recorded cassettes; live smoke via DSST when credentials exist |
 | **eLabFTW** | Category/tags → experiment or resource item | Upload, body block, or `extra_fields` (decide in spike) | Body | Upload checksum | Docker instance from `elabftw-app` in CI |
 | **GitHub** | Directory under prefix | `{id}.json` via Contents API | `{id}.md` | Blob `sha` | HTTP mocks in CI; optional live test |
 
@@ -181,8 +181,14 @@ FastAPI layer over MetaRelay; library work is unaffected.
 
 - **Tooling:** `uv`, `ruff`, `pytest`; mirrors Chronoxiv conventions.
 - **Testing tiers:** unit (fakes, no network) → conformance (local, docker
-  eLabFTW, mocked GitHub, fake LabArchives) → live smoke (manual/nightly,
+  eLabFTW, mocked GitHub, fake LabArchives server) → live smoke (manual/nightly,
   gated by secrets).
+- **Dev environment:** `docker compose up` brings up the fake LabArchives
+  server and a pinned eLabFTW instance, so MetaRelay and Chronoxiv can be
+  developed and demoed end to end with no ELN credentials. The fake
+  implements only the ELN API calls `labapi` makes (`/api/<class>/<method>`),
+  keeps a stateful notebook tree, stubs the redirect auth flow, and can
+  optionally verify the HMAC `sig`.
 - **CI:** GitHub Actions on 3.12/3.13, eLabFTW service container, docs
   build + deploy, PyPI release on tag.
 - **Docs:** Sphinx site under `docs/` with `pydata-sphinx-theme`, matching
@@ -244,7 +250,7 @@ install-time optionality with one version number and one release train.
 | D4 | **Microscopy field scope** | Agree field list with DSST before schema work | Designer, Dev, DSST |
 | D5 | **Hosting / always-on deployment** — ad hoc today; NIH-hosted, interest in always-available internal tool | Design for both; defer deployment work until D2 settles | Tech Lead, DSST |
 | D6 | **Schema boundary for 1b** — the scope asks to "refine the metadata format" without saying where schemas live; the JSON Chronoxiv writes today is mostly its app-shaped workspace document | Propose: MetaRelay owns the record envelope and NDX-aligned models (per the scope's reuse preference); Chronoxiv's workflow models and workspace document stay in Chronoxiv (§3.4). Confirm with DSST before 1b schema work starts | Tech Lead, DSST |
-| R1 | **LabArchives guest account unconfirmed** | Build fake-first using Chronoxiv's existing mocks; DSST runs live smoke tests; record cassettes once access lands | DSST (access), Dev |
+| R1 | **LabArchives guest account unconfirmed** | Build fake-first against a stateful fake LabArchives API server (§4); the same contract tests run against fake and live; DSST runs a smoke script with their credentials and captures real responses as cassettes, and the fake is corrected wherever it disagrees | DSST (access), Dev |
 | R2 | **eLabFTW / `elabapi-python` version drift** | Pin tested eLabFTW version in docker; adapter layer isolates generated client | Dev |
 | R3 | **Chronoxiv regressions during migration** | Keep public signatures through early steps; Chronoxiv's test suite is the regression gate; DSST reviews each PR | Dev, Tech Lead |
 | R4 | **Data scale (5–10 GB, up to tens of GB)** | Out of MetaRelay's path (metadata only); relevant to UI stack and hosting decisions — request HPC node specs and sample data | Tech Lead, DSST |
@@ -281,8 +287,8 @@ PRs. Labels: `goal:1a|1b|1c|2|3`, `backend:<name>`, `schema`, `infra`,
 1. **Project foundation** `infra` `docs` — package scaffold and tooling (uv, ruff, pytest), CI matrix, licence decision and contributor docs, Sphinx docs site with GitHub Pages deploy workflow, PyPI trusted publishing with a first `0.x` release once the core interface and local backend land.
 2. **Core interface** — record, receipt, sync index, logical path/container, session protocol and write modes, auth flow, error hierarchy, schema registry, destination URIs and `connect()`, preview renderers.
 3. **Local backend, conformance suite and CLI** — reference `file://` backend; shared conformance tests and in-memory fake every backend must pass; `metarelay` CLI; quickstart and concepts docs.
-4. **LabArchives backend** `backend:labarchives` — redirect auth flow, container browse/ensure, record upsert with preview and conflict logic, derivative files; fake labapi tree and cassette harness; upstream `labapi` contributions as needed.
-5. **eLabFTW backend** `backend:elabftw` — storage-mapping spike and ADR; docker test instance in CI; full backend to conformance green.
+4. **LabArchives backend** `backend:labarchives` — fake LabArchives API server first (endpoints `labapi` calls, seeded fixtures, stubbed redirect auth) plus the `docker compose` dev stack; confirm `labapi`'s base URL can be overridden (upstream PR if not); redirect auth flow, container browse/ensure, record upsert with preview and conflict logic, derivative files; cassette harness and DSST-run live smoke script; upstream `labapi` contributions as needed.
+5. **eLabFTW backend** `backend:elabftw` — storage-mapping spike and ADR; docker test instance in CI and in the dev stack; full backend to conformance green.
 6. **GitHub backend** `backend:github` — Contents-API backend with `sha` conflict token and size-capped files; mock suite and optional live test.
 
 ### Goal 1b — Metadata format
@@ -293,7 +299,7 @@ PRs. Labels: `goal:1a|1b|1c|2|3`, `backend:<name>`, `schema`, `infra`,
 5. **Round-trip verification** — every schema's examples through every backend; documented versioning policy.
 
 ### Goal 1c — Demonstrate in Chronoxiv `chronoxiv`
-1. **Adopt MetaRelay models and backend** — swap record/receipt models with index migration; reimplement LabArchives metadata and structure modules over the MetaRelay backend behind existing signatures.
+1. **Adopt MetaRelay models and backend** — swap record/receipt models with index migration; reimplement LabArchives metadata and structure modules over the MetaRelay backend behind existing signatures; run Chronoxiv locally against the MetaRelay dev stack.
 2. **Unify storage modes** — route Local JSON through the local backend; config-driven, multi-destination picker.
 3. **Replace session and auth** — MetaRelay session and auth flow on the login page; delete `labapi`-specific error handling; rebuild Chronoxiv's app models on MetaRelay schemas and register its record schemas; remove `labapi` as a direct dependency.
 4. **Service layer (conditional on D2)** — FastAPI wrapper over MetaRelay if the UI moves to React.
