@@ -1,11 +1,32 @@
-# MetaRelay — Proposed Plan
+# MetaRelay Implementation Plan
 
-**Status:** Proposed · **Owner:** Tech Lead · **Date:** 2026-10-30
+**Status:** Revised after DSST review · **Owner:** Tech Lead · **Proposed:** October 30, 2026 · **Revised:** November 3, 2026
 
 MetaRelay is a backend-agnostic Python interface for writing NWB metadata to
 electronic lab notebooks and other destinations. This plan covers the NIH/DSST
 engagement goals from the kickoff: Goal 1 (MetaRelay — this repo), and the
 Chronoxiv-side work in Goals 1c, 2 and 3 that depends on it.
+
+### Changes after DSST review
+
+DSST responded to the proposed plan in
+[#15](https://github.com/nimh-dsst/MetaRelay/issues/15). This revision
+folds in that response:
+
+- **Readable ELN entries are a priority.** Senior users said trainees will not
+  read raw JSON. Every ELN backend must render metadata as tables, with visual
+  rendering as a stretch goal (§3.2, §3.3, D3).
+- **Direct edits in the ELN need a defined behavior.** New decision D7.
+- **Microscopy MVP is planar immunostaining,** pending DANDI guidance on the
+  target NWB extension (§3.4, D4).
+- **New acceptance gates:** existing Chronoxiv workspaces load, migrate, and
+  export unchanged (D6); DSST tests LabArchives with real credentials (R1);
+  user-workflow checks at each milestone (R3).
+- **Deployment discovery starts now,** alongside the UI stack decision,
+  instead of after it (D2, D5).
+- **Early large-dataset test** in Chronoxiv (R4).
+- **eLabFTW pinned to `elabimg` 6.0.9** (R2).
+- **License:** BSD-3-Clause, pending final sign-off (D1).
 
 ---
 
@@ -104,19 +125,24 @@ Optional extras per backend (`metarelay[labarchives]`, `[elabftw]`,
 | **AuthFlow** | Abstracts "none", "token" and "redirect" login. LabArchives' redirect flow (auth URL → callback code → user session) is the only redirect case; UIs render the challenge, the library completes it. |
 | **Destination URI** | `file:///…`, `labarchives://host`, `elabftw://host/api/v2`, `github://org/repo@branch/prefix`. Usable in config files, env, CLI and UI dropdowns alike. |
 | **Errors** | One hierarchy (`Configuration`, `Authentication`, `BackendUnavailable`, `NotFound`, `Conflict`, `Validation`, `PermissionDenied`) that every backend translates native exceptions into. |
-| **Preview** | HTML and Markdown renderers per schema with a generic fallback, so ELN pages stay human-readable. |
+| **Preview** | The human-readable view of a record in the ELN entry. Each schema renders as tables (HTML and Markdown), with a generic table renderer as the fallback. Raw JSON is never the only thing a reader sees. Visual rendering (diagrams, device layouts) is a stretch goal. Required for every ELN backend. |
 
 Conflict semantics are lifted directly from Chronoxiv: no prior receipt and a
 different remote record under the same ID → conflict; prior receipt present
 and remote changed since → conflict; otherwise write only when changed.
+
+The JSON is the source of truth and the preview is regenerated on every
+write. Users can still edit an entry directly in the ELN, so each backend
+must detect edits made outside MetaRelay instead of silently overwriting
+them. The proposed behavior is in D7.
 
 ### 3.3 Backend mapping
 
 | | Container hierarchy | Record storage | Preview | Conflict token | Test strategy |
 | --- | --- | --- | --- | --- | --- |
 | **Local** | Directory tree | `{id}.json` + index/history | `{id}.md` sidecar | Content hash | Conformance oracle, always in CI |
-| **LabArchives** | Notebook → directory → page | JSON attachment entry with marker | Text entry | Attachment checksum | Stateful fake LabArchives API server (real `labapi` runs against it) + recorded cassettes; live smoke via DSST when credentials exist |
-| **eLabFTW** | Category/tags → experiment or resource item | Upload, body block, or `extra_fields` (decide in spike) | Body | Upload checksum | Docker instance from `elabftw-app` in CI |
+| **LabArchives** | Notebook → directory → page | JSON attachment entry with marker | Rich-text entry with rendered tables | Attachment checksum | Stateful fake LabArchives API server (real `labapi` runs against it) + recorded cassettes; DSST tests with real credentials before acceptance |
+| **eLabFTW** | Category/tags → experiment or resource item | Upload, body block, or `extra_fields` (decide in spike) | Body with rendered tables | Upload checksum | Docker instance (`elabftw/elabimg:6.0.9`) in CI |
 | **GitHub** | Directory under prefix | `{id}.json` via Contents API | `{id}.md` | Blob `sha` | HTTP mocks in CI; optional live test |
 
 GitHub is metadata-only: derivative uploads are size-capped with a clear
@@ -143,10 +169,14 @@ error.
   legacy migrations. Chronoxiv rebuilds these on MetaRelay's models, keeping
   its current portable record version readable so existing notebooks keep
   working.
-- **Microscopy** is new, aligned to `ndx-microscopy`, scoped to the fields
-  Goal 2's forms will collect; field list agreed with DSST first. The same
-  boundary applies: NDX-shaped models here, form and workflow models in
-  Chronoxiv.
+- **Microscopy** is new. The MVP is simple planar immunostaining, chosen by
+  DSST from the wide range of microscopy modalities. DSST coordinates field
+  discovery with users. `ndx-microscopy` is the working target, but it is
+  built mainly for optical physiology, so the target NWB extension is
+  confirmed with the DANDI developers
+  ([dandi/helpdesk#213](https://github.com/dandi/helpdesk/discussions/213))
+  before schema work starts. The same boundary applies: NDX-shaped models
+  here, form and workflow models in Chronoxiv.
 - **Shared devices** module aligned to `ndx-ophys-devices` serves both.
 - Because MetaRelay's models mirror the BSD-3 NDX specs rather than copying
   Chronoxiv's app code, little GPL-3 code moves across (see D1).
@@ -175,6 +205,15 @@ Strangler pattern, app usable after every PR:
 If the UI moves to React, steps 4–5 happen in the new frontend against a thin
 FastAPI layer over MetaRelay; library work is unaffected.
 
+Acceptance for the migration goes beyond Chronoxiv's test suite:
+
+- **Existing work stays usable (D6).** Representative existing workspaces and
+  notebooks, supplied by DSST, are loaded, migrated, and checked to confirm
+  their meaning and NWB export output are unchanged. These become fixtures in
+  Chronoxiv's test suite.
+- **User-workflow checks at each milestone (R3).** Open existing work, edit
+  and save metadata, authenticate, publish to an ELN, and export NWB.
+
 ---
 
 ## 4. Quality & delivery
@@ -182,14 +221,15 @@ FastAPI layer over MetaRelay; library work is unaffected.
 - **Tooling:** `uv`, `ruff`, `pytest`; mirrors Chronoxiv conventions.
 - **Testing tiers:** unit (fakes, no network) → conformance (local, docker
   eLabFTW, mocked GitHub, fake LabArchives server) → live smoke (manual/nightly,
-  gated by secrets).
+  gated by secrets). The LabArchives backend is not accepted until DSST has
+  run it against real LabArchives (R1).
 - **Dev environment:** `docker compose up` brings up the fake LabArchives
-  server and a pinned eLabFTW instance, so MetaRelay and Chronoxiv can be
+  server and an eLabFTW instance pinned to `elabimg` 6.0.9, so MetaRelay and Chronoxiv can be
   developed and demoed end to end with no ELN credentials. The fake
   implements only the ELN API calls `labapi` makes (`/api/<class>/<method>`),
   keeps a stateful notebook tree, stubs the redirect auth flow, and can
   optionally verify the HMAC `sig`.
-- **CI:** GitHub Actions on 3.12/3.13, eLabFTW service container, docs
+- **CI:** GitHub Actions on 3.12, 3.13, and 3.14, eLabFTW service container, docs
   build + deploy, PyPI release on tag.
 - **Docs:** Sphinx site under `docs/` with `pydata-sphinx-theme`, matching
   Chronoxiv's docs stack, and MyST so pages are authored in Markdown. Built
@@ -242,20 +282,24 @@ install-time optionality with one version number and one release train.
 
 ## 5. Open decisions & risks
 
-| # | Item | Recommendation / mitigation | Owner |
+Updated with DSST's response in
+[#15](https://github.com/nimh-dsst/MetaRelay/issues/15).
+
+| # | Item | Decision or mitigation | Owner |
 | --- | --- | --- | --- |
-| D1 | **Licence** — repo is currently CC0; Chronoxiv is GPL-3 | Propose BSD-3-Clause (permissive, GPL-compatible); confirm with DSST | Tech Lead |
-| D2 | **Chronoxiv UI stack** — Streamlit vs React | Doesn't block MetaRelay; public API is plain data so an HTTP layer is additive. Decide before Goal 3 design work starts. | Tech Lead, Designer, DSST |
-| D3 | **eLabFTW record storage** — uploads vs `extra_fields` vs body | Timeboxed spike; choose on round-trip fidelity and in-app searchability; record as ADR | Dev |
-| D4 | **Microscopy field scope** | Agree field list with DSST before schema work | Designer, Dev, DSST |
-| D5 | **Hosting / always-on deployment** — ad hoc today; NIH-hosted, interest in always-available internal tool | Design for both; defer deployment work until D2 settles | Tech Lead, DSST |
-| D6 | **Schema boundary for 1b** — the scope asks to "refine the metadata format" without saying where schemas live; the JSON Chronoxiv writes today is mostly its app-shaped workspace document | Propose: MetaRelay owns the record envelope and NDX-aligned models (per the scope's reuse preference); Chronoxiv's workflow models and workspace document stay in Chronoxiv (§3.4). Confirm with DSST before 1b schema work starts | Tech Lead, DSST |
-| R1 | **LabArchives guest account unconfirmed** | Build fake-first against a stateful fake LabArchives API server (§4); the same contract tests run against fake and live; DSST runs a smoke script with their credentials and captures real responses as cassettes, and the fake is corrected wherever it disagrees | DSST (access), Dev |
-| R2 | **eLabFTW / `elabapi-python` version drift** | Pin tested eLabFTW version in docker; adapter layer isolates generated client | Dev |
-| R3 | **Chronoxiv regressions during migration** | Keep public signatures through early steps; Chronoxiv's test suite is the regression gate; DSST reviews each PR | Dev, Tech Lead |
-| R4 | **Data scale (5–10 GB, up to tens of GB)** | Out of MetaRelay's path (metadata only); relevant to UI stack and hosting decisions — request HPC node specs and sample data | Tech Lead, DSST |
-| R5 | **Repository access for reviewers** | Collect reviewer usernames; grant write on MetaRelay and Chronoxiv forks | DSST |
-| R6 | **Adoption** — success depends on PIs liking the tool | Early UX discovery with a day-to-day user; demo-ready builds at each milestone | Designer, DSST |
+| D1 | **License.** The repo is CC0 today; Chronoxiv is GPL-3. | BSD-3-Clause (permissive, GPL-compatible). DSST agrees, pending objections from the other DSST stakeholders. Switch `LICENSE` and package metadata once confirmed, before the first PyPI release. | Tech Lead, DSST |
+| D2 | **Chronoxiv UI stack.** Streamlit or React. | MetaRelay development continues independently; its public API is plain data, so an HTTP layer is additive. DSST is open to React. The decision weighs installation, local file access, updates, and ongoing support, not only interface flexibility. Validate one representative workflow with nontechnical users before committing to a rebuild. Decide alongside D5, before Goal 3 design work starts. | Tech Lead, Designer, DSST |
+| D3 | **eLabFTW record storage.** Uploads, `extra_fields`, or body. | Timeboxed spike, recorded as an ADR. Criteria: round-trip fidelity, in-app searchability, whether a user can find and understand the metadata in eLabFTW without Chronoxiv, and what happens when someone edits it directly (D7). | Dev |
+| D4 | **Microscopy field scope.** | MVP is simple planar immunostaining. DSST coordinates field discovery with users and confirms the target NWB extension with the DANDI developers before schema work starts. | Designer, Dev, DSST |
+| D5 | **Hosting and always-on deployment.** Ad hoc today; interest in an always-available, NIH-hosted internal tool. | Deployment discovery runs alongside D2, not after it. Compare a supported local installation with an institution-managed deployment (for example AWS STRIDES for IRP users). Document where data is processed and stored, and involve the responsible NIH IT and security team before choosing a cloud approach. | Tech Lead, DSST |
+| D6 | **Schema boundary for 1b.** The scope asks to "refine the metadata format" without saying where schemas live; the JSON Chronoxiv writes today is mostly its app-shaped workspace document. | Agreed: MetaRelay owns the record envelope and NDX-aligned models; Chronoxiv's workflow models and workspace document stay in Chronoxiv (§3.4). Acceptance requires loading, migrating, and checking representative existing workspaces (§3.5). | Tech Lead, DSST |
+| D7 | **Direct edits in the ELN.** Users can edit an entry in LabArchives or eLabFTW without going through MetaRelay. | Proposed: the JSON stays the source of truth. A change to the JSON outside MetaRelay is a conflict, as today. Receipts also store a checksum of the rendered preview, so an edit to the preview alone is detected and reported, never silently overwritten. The caller chooses to keep the edit (by editing the record) or replace it (`force`). Confirm with DSST during the eLabFTW spike. | Tech Lead, DSST |
+| R1 | **LabArchives guest account unconfirmed.** | Build fake-first against a stateful fake LabArchives API server (§4); the same contract tests run against fake and live. DSST runs a smoke script with real credentials and captures responses as cassettes, and the fake is corrected wherever it disagrees. DSST tests with real credentials before the backend is accepted. | DSST (access), Dev |
+| R2 | **eLabFTW and `elabapi-python` version drift.** | Pin eLabFTW to `elabimg` 6.0.9 (includes the PHP fix; next major release) in CI and the dev stack. An adapter layer isolates the generated client. | Dev |
+| R3 | **Chronoxiv regressions during migration.** | Keep the app usable after every PR and public signatures stable through early steps. Chronoxiv's test suite is the regression gate, and DSST reviews each PR. At each milestone, check the workflows users depend on: open existing work, edit and save metadata, authenticate, publish, and export NWB. | Dev, Tech Lead, DSST |
+| R4 | **Data scale (5 to 10 GB, up to tens of GB).** | Out of MetaRelay's path (metadata only), but central to Chronoxiv's usability and deployment. Test a representative large dataset early in Chronoxiv: viewing, directory monitoring, and NWB export. Record what stays local, what is transferred, temporary disk needs, and what happens when processing is interrupted. Request HPC node specs and sample data. | Tech Lead, Dev, DSST |
+| R5 | **Reviewer capacity.** DSST expects one primary reviewer. | Keep PRs small and self-contained so one person can review each in one sitting. DSST identifies additional reviewers where possible. | DSST, Tech Lead |
+| R6 | **Adoption.** Success depends on PIs liking the tool. | Early UX discovery with day-to-day users from Prof. Hugo Tejeda's lab; demo-ready builds at each milestone. | Designer, DSST |
 
 ---
 
@@ -269,9 +313,9 @@ demonstration is the deliverable). Goal 1 is the first priority; Goals 2 and
 
 | Milestone | Outcome |
 | --- | --- |
-| **Goal 1a — Multi-backend interface** | Stable record/receipt/session API; local, LabArchives, eLabFTW and GitHub backends all pass the conformance suite; CLI and docs site live |
-| **Goal 1b — Metadata format** | NDX-aligned fiber-photometry schemas derived from Chronoxiv's models; microscopy schemas agreed and delivered; JSON Schema export and `to_nwb` builders; round-trip proven through every backend |
-| **Goal 1c — Demonstrate in Chronoxiv** | Chronoxiv routes all ELN operations through MetaRelay, `labapi` removed as a direct dependency; MetaRelay 1.0 released; same workspace demonstrably publishes to all four backends |
+| **Goal 1a — Multi-backend interface** | Stable record/receipt/session API; local, LabArchives, eLabFTW and GitHub backends all pass the conformance suite; ELN entries show metadata as readable tables; LabArchives verified by DSST with real credentials; CLI and docs site live |
+| **Goal 1b — Metadata format** | NDX-aligned fiber-photometry schemas derived from Chronoxiv's models; microscopy MVP (planar immunostaining) schemas agreed and delivered; JSON Schema export and `to_nwb` builders; round-trip proven through every backend |
+| **Goal 1c — Demonstrate in Chronoxiv** | Chronoxiv routes all ELN operations through MetaRelay, `labapi` removed as a direct dependency; existing workspaces migrate with meaning and export unchanged; user-workflow checks pass; MetaRelay 1.0 released; same workspace demonstrably publishes to all four backends |
 | **Goal 2 — Microscopy modality** | vizarr image viewing, microscopy metadata forms backed by MetaRelay schemas, NWB export |
 | **Goal 3 — UX/UI** | UX review and prioritised list agreed with DSST; design artifacts for primary flows; improvements delivered incrementally; one coherent application across both modalities |
 
@@ -285,25 +329,25 @@ PRs. Labels: `goal:1a|1b|1c|2|3`, `backend:<name>`, `schema`, `infra`,
 
 ### Goal 1a — Multi-backend interface
 1. **Project foundation** `infra` `docs` — package scaffold and tooling (uv, ruff, pytest), CI matrix, licence decision and contributor docs, Sphinx docs site with GitHub Pages deploy workflow, PyPI trusted publishing with a first `0.x` release once the core interface and local backend land.
-2. **Core interface** — record, receipt, sync index, logical path/container, session protocol and write modes, auth flow, error hierarchy, schema registry, destination URIs and `connect()`, preview renderers.
+2. **Core interface** — record, receipt, sync index, logical path/container, session protocol and write modes, auth flow, error hierarchy, schema registry, destination URIs and `connect()`, table-based preview renderers with a preview checksum on receipts (D7).
 3. **Local backend, conformance suite and CLI** — reference `file://` backend; shared conformance tests and in-memory fake every backend must pass; `metarelay` CLI; quickstart and concepts docs.
-4. **LabArchives backend** `backend:labarchives` — fake LabArchives API server first (endpoints `labapi` calls, seeded fixtures, stubbed redirect auth) plus the `docker compose` dev stack; confirm `labapi`'s base URL can be overridden (upstream PR if not); redirect auth flow, container browse/ensure, record upsert with preview and conflict logic, derivative files; cassette harness and DSST-run live smoke script; upstream `labapi` contributions as needed.
-5. **eLabFTW backend** `backend:elabftw` — storage-mapping spike and ADR; docker test instance in CI and in the dev stack; full backend to conformance green.
+4. **LabArchives backend** `backend:labarchives` — fake LabArchives API server first (endpoints `labapi` calls, seeded fixtures, stubbed redirect auth) plus the `docker compose` dev stack; confirm `labapi`'s base URL can be overridden (upstream PR if not); redirect auth flow, container browse/ensure, record upsert with preview and conflict logic, derivative files; cassette harness and DSST-run live smoke script; DSST acceptance test with real credentials; upstream `labapi` contributions as needed.
+5. **eLabFTW backend** `backend:elabftw` — storage-mapping spike and ADR (D3 criteria, including direct edits per D7); `elabimg` 6.0.9 docker instance in CI and in the dev stack; full backend to conformance green.
 6. **GitHub backend** `backend:github` — Contents-API backend with `sha` conflict token and size-capped files; mock suite and optional live test.
 
 ### Goal 1b — Metadata format
 1. **Schema framework** `schema` — base model config, versioning and migration runner, example instances, JSON Schema export with golden-file check, generated schema-reference docs.
 2. **Shared device models** `schema` — `ndx-ophys-devices`-aligned module used by both modalities.
 3. **Fiber-photometry schemas** `schema` — derive the NDX-aligned models from Chronoxiv (optical fiber, excitation source, photodetector, filter, dichroic, indicator, viral vector, injection, fiber insertion, subject); `to_nwb` builders. Workflow models (project, equipment profiles, cohorts, sessions, workspace document, resolved/readiness views) stay in Chronoxiv.
-4. **Microscopy schemas** `schema` — field-scope agreement with DSST; microscope, light source, optical channel, imaging space and session models; `to_nwb` builders.
+4. **Microscopy schemas** `schema` — planar immunostaining MVP; target NWB extension confirmed with DANDI; field-scope agreement with DSST; microscope, light source, optical channel, imaging space and session models; `to_nwb` builders.
 5. **Round-trip verification** — every schema's examples through every backend; documented versioning policy.
 
 ### Goal 1c — Demonstrate in Chronoxiv `chronoxiv`
-1. **Adopt MetaRelay models and backend** — swap record/receipt models with index migration; reimplement LabArchives metadata and structure modules over the MetaRelay backend behind existing signatures; run Chronoxiv locally against the MetaRelay dev stack.
+1. **Adopt MetaRelay models and backend** — swap record/receipt models with index migration; representative existing workspaces from DSST as migration fixtures; reimplement LabArchives metadata and structure modules over the MetaRelay backend behind existing signatures; run Chronoxiv locally against the MetaRelay dev stack.
 2. **Unify storage modes** — route Local JSON through the local backend; config-driven, multi-destination picker.
 3. **Replace session and auth** — MetaRelay session and auth flow on the login page; delete `labapi`-specific error handling; rebuild Chronoxiv's app models on MetaRelay schemas and register its record schemas; remove `labapi` as a direct dependency.
 4. **Service layer (conditional on D2)** — FastAPI wrapper over MetaRelay if the UI moves to React.
-5. **1.0 release and demo** `docs` `infra` — API freeze review with DSST, "write a backend" guide, PyPI trusted publishing, multi-backend demo script and recording.
+5. **1.0 release and demo** `docs` `infra` — user-workflow checks (R3), API freeze review with DSST, "write a backend" guide, PyPI trusted publishing, multi-backend demo script and recording.
 
 ### Goal 2 — Microscopy modality `chronoxiv`
 1. **Image viewing** — vizarr integration with sample data.
@@ -311,10 +355,11 @@ PRs. Labels: `goal:1a|1b|1c|2|3`, `backend:<name>`, `schema`, `infra`,
 3. **NWB export** — microscopy session export and end-to-end test.
 
 ### Goal 3 — UX/UI `chronoxiv`
-1. **Discovery and UX review** — access and setup, pre-questionnaire and working session, brief report, prioritised improvement list agreed with DSST.
-2. **Design system** — wireframes for primary flows (ELN auth, browsing, record curation, directory monitoring, status, NWB packaging, DANDI upload), design tokens, component-library configuration.
-3. **Validation** — usability checks on key flows with a few users.
-4. **Incremental delivery** — improvements landed via PRs with design QA; shared visual and interaction model across fiber-photometry and microscopy pages.
+1. **Stack and deployment discovery** — compare Streamlit and React on installation, local file access, updates, and support (D2); compare a supported local install with an institution-managed deployment, document data locations, and involve NIH IT and security (D5); large-dataset test covering viewing, directory monitoring, and NWB export (R4).
+2. **Discovery and UX review** — access and setup, pre-questionnaire and working session, brief report, prioritised improvement list agreed with DSST.
+3. **Design system** — wireframes for primary flows (ELN auth, browsing, record curation, directory monitoring, status, NWB packaging, DANDI upload), design tokens, component-library configuration.
+4. **Validation** — usability checks on key flows with a few users.
+5. **Incremental delivery** — improvements landed via PRs with design QA; shared visual and interaction model across fiber-photometry and microscopy pages.
 
 ---
 
