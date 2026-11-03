@@ -355,7 +355,7 @@ PRs. Labels: `goal:1a|1b|1c|2|3`, `backend:<name>`, `schema`, `infra`,
 3. **NWB export** — microscopy session export and end-to-end test.
 
 ### Goal 3 — UX/UI `chronoxiv`
-1. **Stack and deployment discovery** — compare Streamlit and React on installation, local file access, updates, and support (D2); compare a supported local install with an institution-managed deployment, document data locations, and involve NIH IT and security (D5); large-dataset test covering viewing, directory monitoring, and NWB export (R4).
+1. **Stack and deployment discovery** — compare Streamlit and React on installation, local file access, updates, and support (D2, nimh-dsst/chronoxiv#77); compare a supported local install with an institution-managed deployment, document data locations, and involve NIH IT and security (D5, nimh-dsst/chronoxiv#78); large-dataset test covering viewing, directory monitoring, and NWB export (R4, nimh-dsst/chronoxiv#79).
 2. **Discovery and UX review** — access and setup, pre-questionnaire and working session, brief report, prioritised improvement list agreed with DSST.
 3. **Design system** — wireframes for primary flows (ELN auth, browsing, record curation, directory monitoring, status, NWB packaging, DANDI upload), design tokens, component-library configuration.
 4. **Validation** — usability checks on key flows with a few users.
