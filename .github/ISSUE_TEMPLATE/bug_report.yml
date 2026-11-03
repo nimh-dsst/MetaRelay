@@ -1,0 +1,57 @@
+name: Bug report
+description: Something in MetaRelay does not work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste credentials, API tokens, or LabArchives access keys. Redact them from logs and tracebacks.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What went wrong? Include the error message or traceback.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest code or CLI command that shows the problem.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - Not backend-specific
+        - Local
+        - LabArchives
+        - eLabFTW
+        - GitHub
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Paste the output of `python -c "import metarelay, sys, platform; print(metarelay.__version__, sys.version, platform.platform())"`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that helps, such as the schema or record involved.

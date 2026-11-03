@@ -1,0 +1,32 @@
+name: Feature or task
+description: Propose new behavior or a piece of planned work.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What should change, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why this is needed and who it helps.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: How a reviewer can tell this is done.
+      value: |
+        - [ ] 
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of Scope
+      description: Related work this issue does not cover. Link issues where they exist.
