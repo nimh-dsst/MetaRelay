@@ -10,6 +10,8 @@ from metarelay.core.errors import (
     PermissionDeniedError,
     ValidationError,
 )
+from metarelay.core.record import Record
+from metarelay.core.registry import SchemaRegistry, SchemaSpec, register_schema
 
 __all__ = [
     "AuthenticationError",
@@ -19,5 +21,9 @@ __all__ = [
     "MetaRelayError",
     "NotFoundError",
     "PermissionDeniedError",
+    "Record",
+    "SchemaRegistry",
+    "SchemaSpec",
     "ValidationError",
+    "register_schema",
 ]
