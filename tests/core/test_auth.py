@@ -2,7 +2,14 @@ import pydantic
 import pytest
 from pydantic_settings import SettingsConfigDict
 
-from metarelay import AuthFlow, DestinationConfig, LoginChallenge, TokenConfig
+from metarelay import (
+    AuthFlow,
+    ConfigurationError,
+    DestinationConfig,
+    LoginChallenge,
+    TokenConfig,
+    ValidationError,
+)
 
 
 def test_auth_flows() -> None:
@@ -27,20 +34,30 @@ def test_token_is_never_printed() -> None:
     assert config.token.get_secret_value() == "s3cret"
 
 
-def test_token_can_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("METARELAY_TOKEN", "from-env")
-    assert TokenConfig().token.get_secret_value() == "from-env"
+def test_login_challenge_destination_is_normalized() -> None:
+    challenge = LoginChallenge(destination="LabArchives://API.x/", auth_url="u", redirect_url="r")
+    assert challenge.destination == "labarchives://api.x"
 
 
-def test_explicit_value_wins_over_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("METARELAY_TOKEN", "from-env")
-    assert TokenConfig(token="explicit").token.get_secret_value() == "explicit"
-
-
-def test_missing_token_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("METARELAY_TOKEN", raising=False)
-    with pytest.raises(pydantic.ValidationError):
+def test_generic_token_config_ignores_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A shared METARELAY_TOKEN would send one service's token to another.
+    monkeypatch.setenv("METARELAY_TOKEN", "github-token")
+    with pytest.raises(ConfigurationError):
         TokenConfig()
+
+
+def test_missing_token_is_a_configuration_error() -> None:
+    with pytest.raises(ConfigurationError, match="token"):
+        TokenConfig()
+
+
+def test_config_errors_never_echo_the_values_passed_in() -> None:
+    with pytest.raises(ConfigurationError) as caught:
+        TokenConfig(token="s3cret", tokn="s3cret-typo")
+    message = str(caught.value)
+    assert "tokn" in message
+    assert "s3cret" not in message
+    assert caught.value.__cause__ is None
 
 
 def test_backends_subclass_with_their_own_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,6 +69,34 @@ def test_backends_subclass_with_their_own_prefix(monkeypatch: pytest.MonkeyPatch
     assert ExampleConfig().api_key.get_secret_value() == "k"
 
 
+def test_a_backend_token_config_reads_only_its_own_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class GitHubConfig(TokenConfig):
+        model_config = SettingsConfigDict(env_prefix="METARELAY_GITHUB_")
+
+    class ElabConfig(TokenConfig):
+        model_config = SettingsConfigDict(env_prefix="METARELAY_ELABFTW_")
+
+    monkeypatch.setenv("METARELAY_GITHUB_TOKEN", "github-token")
+    assert GitHubConfig().token.get_secret_value() == "github-token"
+    with pytest.raises(ConfigurationError):
+        ElabConfig()
+
+
+def test_explicit_value_wins_over_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    class GitHubConfig(TokenConfig):
+        model_config = SettingsConfigDict(env_prefix="METARELAY_GITHUB_")
+
+    monkeypatch.setenv("METARELAY_GITHUB_TOKEN", "from-env")
+    assert GitHubConfig(token="explicit").token.get_secret_value() == "explicit"
+
+
 def test_configs_reject_unknown_fields() -> None:
-    with pytest.raises(pydantic.ValidationError):
+    with pytest.raises(ConfigurationError):
         TokenConfig(token="x", tokn="typo")
+
+
+def test_bad_login_challenge_json_is_a_metarelay_error() -> None:
+    with pytest.raises(ValidationError):
+        LoginChallenge.model_validate_json('{"destination": "not a uri"}')

@@ -84,20 +84,33 @@ class SchemaRegistry:
         """Every registered spec, sorted by ID and version."""
         return [self._specs[key] for key in sorted(self._specs)]
 
-    def validate_payload(self, schema_id: str, version: int, payload: Mapping[str, Any]) -> None:
-        """Raise ``ValidationError`` unless ``payload`` is valid for the schema.
+    def validate_payload(
+        self, schema_id: str, version: int, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Validate ``payload`` and return it in normal form.
 
-        The payload is checked, not rewritten: the record keeps the exact dict
-        the caller passed, so its checksum does not change because a model
-        filled in defaults.
+        Raises ``ValidationError`` unless ``payload`` is valid for the schema.
+
+        The normal form is what the model understood, as JSON-ready data:
+
+        - Values the model coerced keep the coerced type (``"3"`` becomes
+          ``3`` for an ``int`` field), so ``{"count": "3"}`` and
+          ``{"count": 3}`` get the same checksum.
+        - Dates, enums and the like become their JSON form, so the checksum
+          can always be computed.
+        - Defaults are **not** added: a field the caller left out stays out,
+          so adding an optional field to a schema doesn't change the checksum
+          of existing records.
+        - Keys keep the caller's spelling (aliases are kept).
         """
         model = self.get(schema_id, version).model
         try:
-            model.model_validate(payload)
+            validated = model.model_validate(payload)
         except pydantic.ValidationError as error:
             raise ValidationError(
                 f"Payload is not valid for {schema_id} v{version}: {error}"
             ) from error
+        return validated.model_dump(mode="json", by_alias=True, exclude_unset=True)
 
 
 default_registry = SchemaRegistry()

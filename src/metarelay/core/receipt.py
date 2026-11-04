@@ -20,8 +20,10 @@ from datetime import datetime
 from typing import Literal
 
 import pydantic
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
+from metarelay.core.destination import normalize_destination, validate_destination
+from metarelay.core.model import MetaRelayModel, TranslatesValidationErrors
 from metarelay.core.path import Container, LogicalPath
 
 __all__ = ["FileReceipt", "Receipt", "SyncIndex", "receipt_key"]
@@ -37,17 +39,20 @@ def receipt_key(destination: str, path: LogicalPath, record_id: str) -> str:
     Includes the destination so the same record can be synced to several
     destinations, each with its own receipt. Encoded as a JSON list so a
     ``|`` or ``/`` inside a name can't make two different keys collide.
+
+    The destination is normalized, so ``LabArchives://host/`` finds the
+    receipt saved for ``labarchives://host``.
     """
-    return json.dumps([destination, list(path.parts), record_id], ensure_ascii=False)
+    return json.dumps(
+        [normalize_destination(destination), list(path.parts), record_id], ensure_ascii=False
+    )
 
 
-class Receipt(pydantic.BaseModel):
+class Receipt(MetaRelayModel):
     """What MetaRelay knows about a record after writing or reading it."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
     destination: str
-    """The destination URI the record was written to."""
+    """The destination URI the record was written to, normalized."""
     backend: str
     """The backend name, for example ``"labarchives"``."""
     container: Container
@@ -67,15 +72,15 @@ class Receipt(pydantic.BaseModel):
     ``attachment_entry_id``."""
     synced_at: datetime = Field(default_factory=_now)
 
+    _normalize_destination = field_validator("destination")(validate_destination)
+
     @property
     def key(self) -> str:
         return receipt_key(self.destination, self.container.path, self.record_id)
 
 
-class FileReceipt(pydantic.BaseModel):
+class FileReceipt(MetaRelayModel):
     """Proof of a ``write_file`` call (an analysis derivative, for example)."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     destination: str
     backend: str
@@ -87,8 +92,10 @@ class FileReceipt(pydantic.BaseModel):
     native_id: str | None = None
     synced_at: datetime = Field(default_factory=_now)
 
+    _normalize_destination = field_validator("destination")(validate_destination)
 
-class SyncIndex(pydantic.BaseModel):
+
+class SyncIndex(TranslatesValidationErrors, pydantic.BaseModel):
     """Every receipt an application holds, saved with its workspace.
 
     Plain data: the application decides where to store it (Chronoxiv keeps it

@@ -9,21 +9,27 @@ A ``LogicalPath`` is a tuple of names, for example
   eLabFTW spike)
 
 The core never assumes a backend can nest folders.
+
+Names are rejected here only if they are unsafe everywhere (empty, ``/``,
+``.``/``..``, control characters such as NUL or a newline). Characters that
+are only unsafe on some backends, like ``\\`` or ``:`` on a Windows disk, are
+for that backend to reject.
 """
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Self
 
-import pydantic
 from pydantic import ConfigDict, Field, RootModel, field_validator
 
 from metarelay.core.errors import ValidationError
+from metarelay.core.model import MetaRelayModel, TranslatesValidationErrors
 
 __all__ = ["ROOT", "Container", "LogicalPath"]
 
 
-class LogicalPath(RootModel[tuple[str, ...]]):
+class LogicalPath(TranslatesValidationErrors, RootModel[tuple[str, ...]]):
     """An immutable path of names. ``LogicalPath(())`` is the destination root."""
 
     model_config = ConfigDict(frozen=True)
@@ -40,6 +46,8 @@ class LogicalPath(RootModel[tuple[str, ...]]):
                 raise ValueError(f"path name {part!r} has leading or trailing spaces")
             if "/" in part or part in {".", ".."}:
                 raise ValueError(f"path name {part!r} cannot contain '/' or be '.' or '..'")
+            if any(unicodedata.category(char) == "Cc" for char in part):
+                raise ValueError(f"path name {part!r} contains a control character")
         return parts
 
     def __init__(self, root: tuple[str, ...] | list[str] = ()) -> None:
@@ -50,11 +58,10 @@ class LogicalPath(RootModel[tuple[str, ...]]):
                 f"Use LogicalPath(({root!r},)) or LogicalPath.parse({root!r})."
             )
         try:
-            super().__init__(tuple(root))
+            names = tuple(root)
         except TypeError as error:
             raise ValidationError(f"LogicalPath takes a tuple of names, not {root!r}.") from error
-        except pydantic.ValidationError as error:
-            raise ValidationError(f"Invalid path: {error}") from error
+        super().__init__(names)
 
     @classmethod
     def parse(cls, text: str) -> Self:
@@ -83,22 +90,20 @@ class LogicalPath(RootModel[tuple[str, ...]]):
     def __str__(self) -> str:
         return "/".join(self.root)
 
-    def __len__(self) -> int:
-        return len(self.root)
+    # No __len__ on purpose: it would make ROOT falsy, so ``path or default``
+    # would replace the root with the default. Use ``len(path.parts)``.
 
 
 ROOT = LogicalPath()
 
 
-class Container(pydantic.BaseModel):
+class Container(MetaRelayModel):
     """A container at a destination: its logical path plus the backend's own ID.
 
     ``native_id`` is whatever the backend uses to find it again quickly (a
     LabArchives tree ID, an eLabFTW experiment ID). Local and GitHub can leave
     it ``None`` because the path is the ID.
     """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     path: LogicalPath = Field(default_factory=LogicalPath)
     native_id: str | None = None

@@ -1,7 +1,10 @@
+import datetime as dt
+import enum
+
 import pydantic
 import pytest
 
-from metarelay import Record, ValidationError
+from metarelay import Record, ValidationError, record_checksum
 from metarelay.core.registry import SchemaRegistry
 
 
@@ -22,10 +25,49 @@ def test_unregistered_schema_is_rejected(make_record) -> None:
         make_record(schema_id="test.unknown")
 
 
-def test_payload_is_kept_exactly_as_given(make_record) -> None:
+def test_defaults_are_not_added_to_the_payload(make_record) -> None:
     # The model has a default for numerical_aperture, but the record must not
-    # gain it: adding fields would change the checksum.
+    # gain it: adding an optional field to a schema would change every checksum.
     assert "numerical_aperture" not in make_record().payload
+
+
+class Site(enum.StrEnum):
+    NAC = "NAc"
+
+
+class Rich(pydantic.BaseModel):
+    count: int
+    when: dt.date | None = None
+    site: Site | None = None
+    label: str | None = pydantic.Field(default=None, alias="Label")
+
+
+@pytest.fixture
+def rich(isolated_registry):
+    isolated_registry.register("test.rich", 1, Rich)
+
+    def _make(payload: dict) -> Record:
+        return Record(schema_id="test.rich", schema_version=1, record_id="r", payload=payload)
+
+    return _make
+
+
+def test_coerced_values_get_the_same_checksum(rich) -> None:
+    # Pydantic accepts "3" for an int. Storing "3" would make the same
+    # metadata look changed: a spurious conflict.
+    assert rich({"count": "3"}).payload == {"count": 3}
+    assert record_checksum(rich({"count": "3"})) == record_checksum(rich({"count": 3}))
+
+
+def test_non_json_values_are_stored_as_json(rich) -> None:
+    record = rich({"count": 1, "when": dt.date(2026, 11, 4), "site": Site.NAC})
+    assert record.payload == {"count": 1, "when": "2026-11-04", "site": "NAc"}
+    record_checksum(record)  # used to raise TypeError
+    assert Record.model_validate_json(record.model_dump_json()) == record
+
+
+def test_payload_keys_keep_their_aliases(rich) -> None:
+    assert rich({"count": 1, "Label": "x"}).payload == {"count": 1, "Label": "x"}
 
 
 @pytest.mark.parametrize("record_id", ["", ".", "..", "-leading", "has space", "a/b"])

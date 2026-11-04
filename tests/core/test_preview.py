@@ -62,6 +62,13 @@ def test_markdown_is_a_table_and_escaped() -> None:
     assert markdown == ("## Implant\n\n| Field | Value |\n| --- | --- |\n| a\\|b | line1 line2 |\n")
 
 
+def test_markdown_headings_and_titles_escape_inline_html() -> None:
+    markdown = to_markdown([Heading(text="<img src=x>"), Table(title="<b>T</b>", rows=[])])
+    assert "## &lt;img src=x&gt;" in markdown
+    assert "### &lt;b&gt;T&lt;/b&gt;" in markdown
+    assert "<" not in markdown
+
+
 def test_markdown_cells_escape_inline_html() -> None:
     markdown = to_markdown([Table(rows=[("depth", "<5 mm"), ("note", "<b>x</b> & y")])])
     assert "| depth | &lt;5 mm |" in markdown

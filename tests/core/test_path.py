@@ -7,7 +7,9 @@ def test_root_is_empty() -> None:
     assert ROOT.parts == ()
     assert str(ROOT) == ""
     assert ROOT.name == ""
-    assert len(ROOT) == 0
+    assert len(ROOT.parts) == 0
+    # ROOT must be truthy, or `path or default` would replace it.
+    assert (ROOT or LogicalPath(("default",))) is ROOT
 
 
 def test_build_and_walk() -> None:
@@ -25,7 +27,7 @@ def test_parse_round_trips_str() -> None:
     assert LogicalPath.parse("/a//b/") == LogicalPath(("a", "b"))
 
 
-@pytest.mark.parametrize("bad", ["", "  ", "a/b", ".", "..", " padded"])
+@pytest.mark.parametrize("bad", ["", "  ", "a/b", ".", "..", " padded", "a\x00b", "line\nbreak"])
 def test_bad_names_are_rejected(bad: str) -> None:
     with pytest.raises(ValidationError):
         LogicalPath(("ok", bad))
@@ -50,3 +52,15 @@ def test_path_serializes_as_a_plain_list() -> None:
     assert container.model_dump(mode="json") == {"path": ["a", "b"], "native_id": "123"}
     assert Container.model_validate(container.model_dump(mode="json")) == container
     assert container.name == "b"
+
+
+@pytest.mark.parametrize("name", ["back\\slash", "C:", "naïve", "with space"])
+def test_names_only_unsafe_on_some_backends_are_allowed(name: str) -> None:
+    assert LogicalPath((name,)).name == name
+
+
+def test_a_bad_nested_path_is_a_metarelay_error() -> None:
+    with pytest.raises(ValidationError):
+        Container.model_validate({"path": ["a/b"]})
+    with pytest.raises(ValidationError):
+        Container.model_validate_json('{"path": [".."]}')

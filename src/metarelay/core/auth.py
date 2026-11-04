@@ -25,8 +25,10 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-import pydantic
-from pydantic import ConfigDict, Field
+from pydantic import Field, field_validator
+
+from metarelay.core.destination import validate_destination
+from metarelay.core.model import MetaRelayModel
 
 __all__ = ["AuthFlow", "LoginChallenge"]
 
@@ -39,10 +41,8 @@ class AuthFlow(StrEnum):
     REDIRECT = "redirect"
 
 
-class LoginChallenge(pydantic.BaseModel):
+class LoginChallenge(MetaRelayModel):
     """The first half of a redirect login, for the application to show."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     destination: str
     """The destination URI being logged in to."""
@@ -53,3 +53,5 @@ class LoginChallenge(pydantic.BaseModel):
     state: dict[str, str] = Field(default_factory=dict)
     """Anything the backend needs to finish the login. Not a secret, but don't
     show it to the user."""
+
+    _normalize_destination = field_validator("destination")(validate_destination)

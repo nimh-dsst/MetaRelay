@@ -16,6 +16,9 @@ Backends never build preview markup themselves. They call ``render_preview``
 and store the result. Visual rendering (diagrams, device layouts) is a later
 stretch goal: it would be a new block type here, and no renderer or backend
 would need to change.
+
+Renderers live in their own registry here, keyed by schema ID, separate from
+the schema registry. #8 may merge the two when real schemas arrive.
 """
 
 from __future__ import annotations
@@ -24,9 +27,9 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from html import escape
 from typing import Annotated, Any, Literal
 
-import pydantic
-from pydantic import ConfigDict, Field
+from pydantic import Field
 
+from metarelay.core.model import MetaRelayModel
 from metarelay.core.record import Record
 
 __all__ = [
@@ -45,17 +48,13 @@ __all__ = [
 EMPTY = "—"
 
 
-class Heading(pydantic.BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class Heading(MetaRelayModel):
     kind: Literal["heading"] = "heading"
     text: str
 
 
-class Table(pydantic.BaseModel):
+class Table(MetaRelayModel):
     """A two-column field/value table."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["table"] = "table"
     title: str | None = None
@@ -66,10 +65,8 @@ Block = Annotated[Heading | Table, Field(discriminator="kind")]
 Renderer = Callable[[Record], list[Heading | Table]]
 
 
-class Preview(pydantic.BaseModel):
+class Preview(MetaRelayModel):
     """A record's readable view, in both formats."""
-
-    model_config = ConfigDict(frozen=True)
 
     blocks: list[Block]
     html: str
@@ -163,11 +160,11 @@ def to_markdown(blocks: Sequence[Heading | Table]) -> str:
     parts: list[str] = []
     for block in blocks:
         if isinstance(block, Heading):
-            parts.append(f"## {_md_text(block.text)}")
+            parts.append(f"## {_md_text(_md_escape(block.text))}")
         else:
             lines = []
             if block.title:
-                lines += [f"### {_md_text(block.title)}", ""]
+                lines += [f"### {_md_text(_md_escape(block.title))}", ""]
             lines += ["| Field | Value |", "| --- | --- |"]
             lines += [f"| {_md_cell(field)} | {_md_cell(value)} |" for field, value in block.rows]
             parts.append("\n".join(lines))
@@ -178,6 +175,10 @@ def _md_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def _md_cell(text: str) -> str:
+def _md_escape(text: str) -> str:
     # GitHub renders inline HTML in Markdown, so escape it like the HTML output.
-    return _md_text(escape(text.replace("\\", "\\\\").replace("|", "\\|"), quote=False))
+    return escape(text, quote=False)
+
+
+def _md_cell(text: str) -> str:
+    return _md_text(_md_escape(text.replace("\\", "\\\\").replace("|", "\\|")))

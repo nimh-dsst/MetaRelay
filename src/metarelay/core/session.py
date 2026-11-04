@@ -12,10 +12,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-import pydantic
-from pydantic import ConfigDict
-
 from metarelay.core.conflict import WriteMode
+from metarelay.core.model import MetaRelayModel
 from metarelay.core.path import ROOT, Container, LogicalPath
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
@@ -23,10 +21,8 @@ from metarelay.core.record import Record
 __all__ = ["Session", "StoredRecord"]
 
 
-class StoredRecord(pydantic.BaseModel):
+class StoredRecord(MetaRelayModel):
     """A record read from a destination, with the receipt that describes it."""
-
-    model_config = ConfigDict(frozen=True)
 
     record: Record
     receipt: Receipt

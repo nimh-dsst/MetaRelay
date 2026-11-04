@@ -1,8 +1,19 @@
 import hashlib
 import json
 
-from metarelay import Container, LogicalPath, Receipt, SyncIndex, record_checksum
+import pytest
+
+from metarelay import (
+    Container,
+    FileReceipt,
+    LogicalPath,
+    Receipt,
+    SyncIndex,
+    ValidationError,
+    record_checksum,
+)
 from metarelay.core.checksum import canonical_json, preview_checksum
+from metarelay.core.session import StoredRecord
 
 
 def make_receipt(record_id: str = "fiber-1", destination: str = "file:///tmp/x") -> Receipt:
@@ -80,8 +91,8 @@ def test_sync_index_keys_by_destination_path_and_id() -> None:
 def test_keys_cannot_collide_through_separator_characters() -> None:
     from metarelay.core.receipt import receipt_key
 
-    assert receipt_key("a|b", LogicalPath(("c",)), "d") != receipt_key(
-        "a", LogicalPath(("b|c",)), "d"
+    assert receipt_key("x://a|b", LogicalPath(("c",)), "d") != receipt_key(
+        "x://a", LogicalPath(("b|c",)), "d"
     )
 
 
@@ -89,3 +100,33 @@ def test_sync_index_round_trips_through_json() -> None:
     index = SyncIndex()
     index.put(make_receipt())
     assert SyncIndex.model_validate_json(index.model_dump_json()) == index
+
+
+def test_equivalent_destination_spellings_find_the_same_receipt() -> None:
+    index = SyncIndex()
+    index.put(make_receipt(destination="LabArchives://API.Example.org/"))
+    found = index.get("labarchives://api.example.org", LogicalPath(("Study", "M1")), "fiber-1")
+    assert found is not None
+    assert found.destination == "labarchives://api.example.org"
+
+
+# Every public model loaded from bad data raises metarelay.ValidationError,
+# never pydantic's. Add a row whenever a new escape is found.
+GOOD_RECEIPT = json.loads(make_receipt().model_dump_json())
+MALFORMED = [
+    (SyncIndex, {"receipts": {"k": {**GOOD_RECEIPT, "container": {"path": ["a/b"]}}}}),
+    (SyncIndex, {"index_version": 2}),
+    (Receipt, {**GOOD_RECEIPT, "destination": "not a uri"}),
+    (Receipt, {**GOOD_RECEIPT, "checksum": None}),
+    (FileReceipt, {"destination": "file:///x"}),
+    (StoredRecord, {"record": {}, "receipt": GOOD_RECEIPT}),
+    (Container, {"path": "a/b"}),
+]
+
+
+@pytest.mark.parametrize(("model", "data"), MALFORMED)
+def test_malformed_data_is_a_metarelay_error(model, data) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate(data)
+    with pytest.raises(ValidationError):
+        model.model_validate_json(json.dumps(data))

@@ -93,6 +93,24 @@ class TestDestination:
     def test_scheme_is_lowercased(self) -> None:
         assert Destination.parse("ELABFTW://host/api/v2").scheme == "elabftw"
 
+    @pytest.mark.parametrize(
+        ("uri", "normal"),
+        [
+            ("LabArchives://API.Example.org/", "labarchives://api.example.org"),
+            ("labarchives://api.example.org", "labarchives://api.example.org"),
+            ("elabftw://Elab.org/api/v2/", "elabftw://elab.org/api/v2"),
+            ("file:///Users/Me/Metadata/", "file:///Users/Me/Metadata"),
+            ("file:///", "file:///"),
+        ],
+    )
+    def test_uris_are_normalized(self, uri: str, normal: str) -> None:
+        assert Destination.parse(uri).uri == normal
+
+    def test_credentials_in_the_uri_are_rejected(self) -> None:
+        with pytest.raises(ConfigurationError, match="config object") as caught:
+            Destination.parse("elabftw://user:hunter2@elab.org")
+        assert "hunter2" not in str(caught.value)
+
     @pytest.mark.parametrize("bad", ["/just/a/path", "", "no scheme", "1bad://x"])
     def test_rejects_non_uris(self, bad: str) -> None:
         with pytest.raises(ConfigurationError):
@@ -183,3 +201,50 @@ class TestRedirectLogin:
 def test_real_entry_point_group_is_queried() -> None:
     # No backends ship yet (#4 adds file://), so this only checks the lookup runs.
     assert isinstance(list(backend_module._entry_points()), list)
+
+
+def test_auth_flow_given_as_a_plain_string_still_routes(installed) -> None:
+    class StringRedirect(RedirectBackend):
+        auth_flow = "redirect"  # type: ignore[assignment]
+
+    installed(FakeEntryPoint("labarchives", lambda: StringRedirect))
+    assert auth_flow("labarchives://api.x") is AuthFlow.REDIRECT
+    with pytest.raises(ConfigurationError, match="browser login"):
+        connect("labarchives://api.x")
+    assert begin_login("labarchives://api.x", "http://localhost/cb").auth_url
+
+
+def test_unknown_auth_flow_is_a_configuration_error(installed) -> None:
+    class Odd(TokenBackend):
+        auth_flow = "oauth"  # type: ignore[assignment]
+
+    installed(FakeEntryPoint("fake", lambda: Odd))
+    with pytest.raises(ConfigurationError, match="auth_flow"):
+        connect("fake://x")
+
+
+def _raise(error: Exception):
+    def loader():
+        raise error
+
+    return loader
+
+
+class NeedsArguments(TokenBackend):
+    def __init__(self, required: str) -> None:
+        self.required = required
+
+
+@pytest.mark.parametrize(
+    "loader",
+    [
+        _raise(AttributeError("module has no attribute 'Backnd'")),
+        _raise(SyntaxError("bad plugin")),
+        lambda: NeedsArguments,
+    ],
+    ids=["typo-in-entry-point", "broken-plugin", "constructor-needs-arguments"],
+)
+def test_any_load_failure_is_a_configuration_error(installed, loader) -> None:
+    installed(FakeEntryPoint("fake", loader))
+    with pytest.raises(ConfigurationError, match="fake://"):
+        connect("fake://x")
