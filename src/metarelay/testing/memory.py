@@ -141,7 +141,7 @@ class MemorySession:
 
     def _require_container(self, path: LogicalPath) -> None:
         if path not in self._containers:
-            raise NotFoundError(f"Container {str(path)!r} does not exist. Ensure it first.")
+            raise NotFoundError(f"Container {str(path)!r} does not exist. Create it first.")
 
     def _receipt(self, path: LogicalPath, stored: _Stored) -> Receipt:
         checksum = record_checksum(stored.record)
@@ -161,10 +161,11 @@ class MemorySession:
 class MemoryBackend:
     """A ``Backend`` that opens ``MemorySession`` objects.
 
-    Not registered as an entry point, so ``connect("memory://...")`` does not
-    work in normal use. Tests can register it (see ``tests/test_cli.py``).
-    Every ``open`` of the same URI returns the same session, so data survives
-    between ``connect`` calls within one backend object.
+        Not registered as an entry point, so ``connect("memory://...")`` does not
+        work in normal use. Tests can install it by
+    monkeypatching ``metarelay.core.backend.load_backend``.
+        Every ``open`` of the same URI returns the same session, so data survives
+        between ``connect`` calls within one backend object.
     """
 
     name = BACKEND_NAME

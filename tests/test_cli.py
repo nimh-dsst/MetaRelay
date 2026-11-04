@@ -72,6 +72,7 @@ def test_errors_are_short_messages(dest: str, capsys) -> None:
     assert capsys.readouterr().err.startswith("metarelay: ")
     assert main(["ls", "nope://x"]) == 1
     assert main(["--import", "no_such_module_xyz", "ls", dest]) == 1
+    assert "Could not import" in capsys.readouterr().err
 
 
 def test_invalid_record_is_reported(dest: str, tmp_path: Path, capsys) -> None:
@@ -81,7 +82,7 @@ def test_invalid_record_is_reported(dest: str, tmp_path: Path, capsys) -> None:
     assert "payload" in capsys.readouterr().err
 
 
-def test_installed_command_runs(tmp_path: Path) -> None:
+def test_runs_as_a_module(tmp_path: Path) -> None:
     result = subprocess.run(
         [sys.executable, "-m", "metarelay.cli", "ls", tmp_path.as_uri()],
         capture_output=True,
@@ -107,3 +108,10 @@ def test_import_registers_schemas(dest: str, tmp_path: Path, monkeypatch, capsys
         ' "payload": {"text": "hi"}}'
     )
     assert main(["--import", "lab_schemas", "write", dest, "Notes", str(note)]) == 0
+
+
+def test_broken_import_module_is_a_short_error(dest: str, tmp_path: Path, monkeypatch, capsys):
+    (tmp_path / "broken_schemas.py").write_text("this is not python\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    assert main(["--import", "broken_schemas", "ls", dest]) == 1
+    assert "Could not import 'broken_schemas'" in capsys.readouterr().err

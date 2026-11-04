@@ -26,7 +26,12 @@ from pathlib import Path
 
 from metarelay.core.backend import connect
 from metarelay.core.conflict import WriteMode
-from metarelay.core.errors import ConflictError, MetaRelayError, ValidationError
+from metarelay.core.errors import (
+    ConfigurationError,
+    ConflictError,
+    MetaRelayError,
+    ValidationError,
+)
 from metarelay.core.path import LogicalPath
 from metarelay.core.receipt import SyncIndex
 from metarelay.core.record import Record
@@ -105,7 +110,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             session.close()
     except ConflictError as error:
         print(f"metarelay: conflict: {error}", file=sys.stderr)
-        print("Re-run with --mode force to overwrite.", file=sys.stderr)
+        print(
+            "If you wrote it earlier, pass the same --receipts file. "
+            "To overwrite it anyway, re-run with --mode force.",
+            file=sys.stderr,
+        )
         return 3
     except MetaRelayError as error:
         print(f"metarelay: {error}", file=sys.stderr)
@@ -154,8 +163,10 @@ def _run(args: argparse.Namespace, session: Session) -> int:
 def _import(module: str) -> None:
     try:
         importlib.import_module(module)
-    except ImportError as error:
-        raise ValidationError(f"Could not import {module!r}: {error}") from error
+    except MetaRelayError:
+        raise
+    except Exception as error:  # a module can fail to import in any way
+        raise ConfigurationError(f"Could not import {module!r}: {error}") from error
 
 
 def _read_input(name: str) -> bytes:

@@ -22,7 +22,8 @@ starting with ``.`` are reserved for MetaRelay's own files.
 
 Writes are atomic (a temporary file, then a rename), and ``create`` mode is
 enforced: two writers cannot both create the same record. Other modes assume
-one writer per container at a time.
+one writer per container at a time
+(``list_records`` still finds every record if two writers race on the index).
 """
 
 from __future__ import annotations
@@ -258,8 +259,14 @@ class LocalSession:
 
     def list_records(self, path: LogicalPath) -> list[StoredRecord]:
         folder = self._existing_folder(path)
+        with _disk_errors(f"list records in {self._describe(path)}"):
+            index = self._load_index(folder)
+            # Also scan, so a record whose index entry was lost (two writers
+            # updating the index at once, say) still shows up.
+            ids = set(index["records"]) | set(self._scan_records(folder))
+            ids -= {name.removesuffix(".json") for name in index["files"]}
         found = []
-        for record_id in sorted(self._load_index(folder)["records"]):
+        for record_id in sorted(ids):
             try:
                 found.append(self._read(path, folder, record_id))
             except NotFoundError:
@@ -313,7 +320,10 @@ class LocalSession:
     def _existing_folder(self, path: LogicalPath) -> Path:
         folder = self._folder(path)
         if not folder.is_dir():
-            raise NotFoundError(f"{self._describe(path)} does not exist. Ensure it first.")
+            raise NotFoundError(
+                f"{self._describe(path)} does not exist. Create it first "
+                "(ensure_container(), or metarelay mkdir)."
+            )
         return folder
 
     def _describe(self, path: LogicalPath) -> str:
@@ -373,7 +383,13 @@ class LocalSession:
             return {"records": self._scan_records(folder), "files": []}
         try:
             index = json.loads(data)
-            return {"records": list(index["records"]), "files": list(index["files"])}
+            records, files = index["records"], index["files"]
+            if not all(
+                isinstance(names, list) and all(isinstance(name, str) for name in names)
+                for names in (records, files)
+            ):
+                raise TypeError("records and files must be lists of names")
+            return {"records": records, "files": files}
         except (ValueError, KeyError, TypeError) as error:
             raise ValidationError(
                 f"{folder / META_DIR / INDEX_FILE} is damaged. Delete it, and MetaRelay "

@@ -163,17 +163,6 @@ def test_missing_preview_is_restored(session: LocalSession, make_record) -> None
     assert receipt.preview_checksum is not None
 
 
-def test_record_that_differs_only_in_case_conflicts(session: LocalSession, make_record) -> None:
-    session.write_record(STUDY, make_record("Fiber-1"))
-    case_insensitive = (folder(session) / "fiber-1.json").exists()
-    if not case_insensitive:
-        pytest.skip("This disk is case-sensitive.")
-    with pytest.raises(ConflictError):
-        session.write_record(STUDY, make_record("fiber-1"))
-    with pytest.raises(NotFoundError):
-        session.read_record(STUDY, "fiber-1")
-
-
 # Names
 
 
@@ -277,3 +266,69 @@ def test_deleted_index_is_rebuilt(session: LocalSession, make_record) -> None:
     session.write_record(STUDY, make_record("rec-3"))
     index = json.loads((folder(session) / ".metarelay" / "index.json").read_text())
     assert index["records"] == ["rec-1", "rec-2", "rec-3"]
+
+
+def test_create_is_enforced_when_two_writers_race(
+    session: LocalSession, make_record, monkeypatch
+) -> None:
+    from metarelay.backends import local
+
+    session.write_record(STUDY, make_record(diameter_um=400))
+    # The other writer's file appears after our check: pretend we saw nothing.
+    with monkeypatch.context() as patch:
+        patch.setattr(local, "_read_optional", lambda path: None)
+        with pytest.raises(ConflictError):
+            session.write_record(STUDY, make_record(diameter_um=200), mode=WriteMode.CREATE)
+    assert session.read_record(STUDY, "fiber-1").record.payload == {"diameter_um": 400.0}
+
+
+def test_record_lost_from_the_index_is_still_listed(session: LocalSession, make_record) -> None:
+    session.write_record(STUDY, make_record("rec-1"))
+    session.write_record(STUDY, make_record("rec-2"))
+    index_file = folder(session) / ".metarelay" / "index.json"
+    index = json.loads(index_file.read_text())
+    index["records"] = ["rec-1"]  # a racing writer dropped rec-2
+    index_file.write_text(json.dumps(index))
+    assert [s.record.record_id for s in session.list_records(STUDY)] == ["rec-1", "rec-2"]
+
+
+@pytest.mark.parametrize(
+    "index", ['{"records": "abc", "files": []}', '{"records": [1], "files": []}', "[]"]
+)
+def test_index_of_the_wrong_shape_is_damaged(session: LocalSession, index: str) -> None:
+    (folder(session) / ".metarelay").mkdir()
+    (folder(session) / ".metarelay" / "index.json").write_text(index)
+    with pytest.raises(ValidationError, match="damaged"):
+        session.list_records(STUDY)
+
+
+def test_unreadable_index_is_permission_denied(session: LocalSession, make_record) -> None:
+    import os
+
+    from metarelay import PermissionDeniedError
+
+    if os.geteuid() == 0:
+        pytest.skip("root can read anything")
+    session.write_record(STUDY, make_record())
+    index_file = folder(session) / ".metarelay" / "index.json"
+    index_file.chmod(0)
+    try:
+        with pytest.raises(PermissionDeniedError):
+            session.list_records(STUDY)
+    finally:
+        index_file.chmod(0o644)
+
+
+def test_other_record_under_a_case_folded_name_conflicts(
+    session: LocalSession, make_record
+) -> None:
+    # What a case-insensitive disk shows: fiber-1.json holds record "Fiber-1".
+    session.write_record(STUDY, make_record("Fiber-1"))
+    other = folder(session) / "Fiber-1.json"
+    target = folder(session) / "fiber-1.json"
+    if not target.exists():
+        other.rename(target)
+    with pytest.raises(ConflictError):
+        session.write_record(STUDY, make_record("fiber-1"))
+    with pytest.raises(NotFoundError):
+        session.read_record(STUDY, "fiber-1")
