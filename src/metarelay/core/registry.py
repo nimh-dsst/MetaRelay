@@ -15,12 +15,16 @@ Versioning and migrations between versions are #8. This module only answers
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, get_args
 
 import pydantic
+from pydantic_core import PydanticSerializationError
 
 from metarelay.core.errors import ConfigurationError, ValidationError
 
@@ -50,10 +54,15 @@ class SchemaRegistry:
         Registering the same model twice is a no-op. Registering a different
         model under an existing ID and version raises ``ConfigurationError``.
 
-        The model, and every model nested in it, must set ``extra`` to
-        ``"forbid"`` or ``"allow"``. Pydantic's default, ``"ignore"``, would
-        accept unknown keys and then drop them from the stored payload
-        without telling anyone.
+        The model, and every model nested in it, must:
+
+        - set ``extra`` to ``"forbid"`` or ``"allow"``. Pydantic's default,
+          ``"ignore"``, would accept unknown keys and then drop them from the
+          stored payload without telling anyone.
+        - read each field under the name it saves it under. Use
+          ``Field(alias=...)``, which sets both; a ``validation_alias`` or
+          ``serialization_alias`` on its own would save a record that can't
+          be read back.
         """
         if not SCHEMA_ID_PATTERN.fullmatch(schema_id):
             raise ConfigurationError(
@@ -62,7 +71,7 @@ class SchemaRegistry:
             )
         if version < 1:
             raise ConfigurationError(f"Schema version must be 1 or higher, not {version}.")
-        _require_explicit_extra(model)
+        _check_schema_model(model)
         key = (schema_id, version)
         existing = self._specs.get(key)
         if existing is not None:
@@ -107,7 +116,17 @@ class SchemaRegistry:
         - Defaults are **not** added: a field the caller left out stays out,
           so adding an optional field to a schema doesn't change the checksum
           of existing records.
-        - Keys keep the caller's spelling (aliases are kept).
+        - Keys are spelled the way the schema saves them (its aliases).
+
+        The normal form is exactly what a backend saves as JSON, and reading
+        it back gives the same normal form. A payload that can't make that
+        round trip raises ``ValidationError`` here, at write time, instead of
+        becoming a record nobody can read:
+
+        - NaN or infinity anywhere in it (JSON can't store them, and pydantic
+          would save them as ``null``);
+        - a value the model saves in a form it can't read, or reads back as
+          something different (a custom serializer, say).
         """
         model = self.get(schema_id, version).model
         try:
@@ -116,17 +135,73 @@ class SchemaRegistry:
             raise ValidationError(
                 f"Payload is not valid for {schema_id} v{version}: {error}"
             ) from error
-        return validated.model_dump(mode="json", by_alias=True, exclude_unset=True)
+        what = f"Payload for {schema_id} v{version}"
+        normal = _json_form(validated, what)
+        if normal == payload:
+            return normal  # already normal (a record read back): the round trip holds
+        try:
+            again = _json_form(model.model_validate(normal), what)
+        except pydantic.ValidationError as error:
+            raise ValidationError(f"{what} would not read back after saving: {error}") from error
+        if again != normal:
+            raise ValidationError(
+                f"{what} reads back as something different after saving, so its checksum "
+                "would change on every sync. Check the schema's custom serializers."
+            )
+        return normal
 
 
-def _require_explicit_extra(model: type[pydantic.BaseModel]) -> None:
+def _check_schema_model(model: type[pydantic.BaseModel]) -> None:
+    """Refuse models whose payloads could not be saved and read back intact."""
     for each in _models_in(model, set()):
+        name = each.__qualname__
         if each.model_config.get("extra") not in ("forbid", "allow"):
             raise ConfigurationError(
-                f"Schema model {each.__qualname__} must set "
+                f"Schema model {name} must set "
                 'model_config = ConfigDict(extra="forbid") (or "allow"). '
                 "With pydantic's default, unknown keys would be silently dropped."
             )
+        by_alias = each.model_config.get("validate_by_alias", True) is not False
+        for field_name, field in each.model_fields.items():
+            saved_as = field.serialization_alias or field.alias or field_name
+            if not by_alias:  # validate_by_alias=False ignores every alias
+                read_as = field_name
+            elif field.validation_alias is not None:
+                read_as = field.validation_alias
+            else:
+                read_as = field.alias or field_name
+            if read_as != saved_as:
+                raise ConfigurationError(
+                    f"Field {name}.{field_name} is read as {read_as!r} but saved as "
+                    f"{saved_as!r}, so a saved record could not be read back. "
+                    "Use Field(alias=...) to set both."
+                )
+
+
+def _json_form(validated: pydantic.BaseModel, what: str) -> dict[str, Any]:
+    """The payload as a backend saves it: JSON data, without NaN or infinity."""
+    try:
+        # Check the Python values: the JSON dump already turns NaN into null.
+        if _has_non_finite(validated.model_dump(by_alias=True, exclude_unset=True)):
+            raise ValidationError(
+                f"{what} contains NaN or infinity, which JSON can't store. "
+                "Leave the field out, or use null, to mark a missing value."
+            )
+        return json.loads(validated.model_dump_json(by_alias=True, exclude_unset=True))
+    except PydanticSerializationError as error:
+        raise ValidationError(f"{what} can't be saved as JSON: {error}") from error
+
+
+def _has_non_finite(value: Any) -> bool:
+    if isinstance(value, Decimal):
+        return not value.is_finite()
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, Mapping):
+        return any(_has_non_finite(item) for item in value.values())
+    if isinstance(value, list | tuple | set | frozenset):
+        return any(_has_non_finite(item) for item in value)
+    return False
 
 
 def _models_in(

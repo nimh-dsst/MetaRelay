@@ -139,3 +139,14 @@ def test_create_as_a_string_refuses_an_existing_record() -> None:
 def test_unknown_mode_is_rejected() -> None:
     with pytest.raises(ValidationError, match="Unknown write mode 'crate'"):
         decide("crate", remote=LOCAL)
+
+
+def test_preview_conflict_advice_works() -> None:
+    # The old message said "copy the change into the record", but only force clears it.
+    prior = receipt(LOCAL, "p1")
+    with pytest.raises(ConflictError, match="mode='force'") as caught:
+        decide(remote=LOCAL, prior=prior, remote_preview="p2")
+    assert "copy it into the record first" in str(caught.value)
+    assert decide(WriteMode.FORCE, remote=LOCAL, prior=prior, remote_preview="p2") is (
+        WriteAction.WRITE
+    )

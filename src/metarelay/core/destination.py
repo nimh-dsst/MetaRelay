@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from typing import Self
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from metarelay.core.errors import ConfigurationError
 from metarelay.core.model import MetaRelayModel
@@ -45,7 +45,10 @@ class Destination(MetaRelayModel):
             raise ConfigurationError(
                 f"Destination {uri!r} is not a URI. Use a form like file:///path/to/folder."
             )
-        parts = urlsplit(uri)
+        try:
+            parts = urlsplit(uri)
+        except ValueError as error:  # e.g. "Invalid IPv6 URL" for "x://[host"
+            raise ConfigurationError(f"Destination {uri!r} is not a valid URI: {error}.") from error
         scheme = parts.scheme.lower()
         if not _SCHEME_PATTERN.fullmatch(scheme):
             raise ConfigurationError(f"Destination {uri!r} has an invalid scheme.")
@@ -59,7 +62,13 @@ class Destination(MetaRelayModel):
         path = parts.path.rstrip("/")
         if scheme == "file" and not path:
             path = "/"  # file:/// is the filesystem root, not "no path"
-        normalized = urlunsplit((scheme, netloc, path, parts.query, parts.fragment))
+        # Built by hand: urlunsplit drops the "//" for an empty host on schemes
+        # it doesn't know, and parse() would then reject its own output.
+        normalized = f"{scheme}://{netloc}{path}"
+        if parts.query:
+            normalized += f"?{parts.query}"
+        if parts.fragment:
+            normalized += f"#{parts.fragment}"
         return cls(uri=normalized, scheme=scheme, netloc=netloc, path=path)
 
     def __str__(self) -> str:

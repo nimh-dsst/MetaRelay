@@ -107,8 +107,9 @@ def decide_write(
         and remote_preview_checksum != prior_receipt.preview_checksum
     ):
         raise ConflictError(
-            "The notebook entry was edited directly since it was last synced. Copy the "
-            "change into the record, or write again with mode='force' to replace it."
+            "The notebook entry was edited directly since it was last synced. To keep "
+            "the edit, copy it into the record first. Then write again with "
+            "mode='force' to replace the entry."
         )
 
     return WriteAction.SKIP if remote_checksum == local_checksum else WriteAction.WRITE

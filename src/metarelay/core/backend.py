@@ -88,7 +88,15 @@ def load_backend(scheme: str) -> Backend:
     extra, a typo in the entry point, a constructor that needs arguments)
     becomes ``ConfigurationError``.
     """
-    available = {ep.name: ep for ep in _entry_points()}
+    available: dict[str, EntryPoint] = {}
+    for candidate in _entry_points():
+        existing = available.setdefault(candidate.name, candidate)
+        # The same entry point seen twice (a package on sys.path twice) is fine.
+        if candidate.name == scheme and existing.value != candidate.value:
+            raise ConfigurationError(
+                f"Two installed packages register a {scheme}:// backend "
+                f"({existing.value} and {candidate.value}). Uninstall one of them."
+            )
     entry_point = available.get(scheme)
     if entry_point is None:
         if scheme in _EXTRA_FOR_SCHEME:
@@ -102,8 +110,11 @@ def load_backend(scheme: str) -> Backend:
     try:
         loaded = entry_point.load()
     except ImportError as error:
-        hint = _install_hint(scheme) if scheme in _EXTRA_FOR_SCHEME else str(error)
-        raise ConfigurationError(f"The {scheme}:// backend could not load. {hint}") from error
+        # Name the real error: the extra may be installed and something else broken.
+        message = f"The {scheme}:// backend could not load ({error})."
+        if scheme in _EXTRA_FOR_SCHEME:
+            message += f" {_install_hint(scheme)}"
+        raise ConfigurationError(message) from error
     except Exception as error:
         raise ConfigurationError(
             f"The {scheme}:// entry point ({entry_point.value}) could not load: {error}"

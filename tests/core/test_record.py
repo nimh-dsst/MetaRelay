@@ -111,3 +111,16 @@ def test_a_custom_registry_can_be_passed_in_context(make_record) -> None:
     data = make_record().model_dump()
     with pytest.raises(ValidationError, match="not registered"):
         Record.model_validate(data, context={"registry": other})
+
+
+def test_record_round_trips_through_dump_and_json(rich) -> None:
+    # Johnny's repro on #17: Record.model_validate(record.model_dump()) must work,
+    # because it is the edit recipe and what every backend's read_record does.
+    record = Record(
+        schema_id="test.rich",
+        schema_version=1,
+        record_id="r1",
+        payload={"count": "3", "Label": "x", "when": "2026-01-02", "site": "NAc"},
+    )
+    assert Record.model_validate(record.model_dump()) == record
+    assert Record.model_validate_json(record.model_dump_json()) == record

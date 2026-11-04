@@ -7,8 +7,12 @@ import pytest
 from metarelay import (
     AuthFlow,
     ConfigurationError,
+    Container,
     Destination,
+    LogicalPath,
     LoginChallenge,
+    Receipt,
+    SyncIndex,
     TokenConfig,
     auth_flow,
     begin_login,
@@ -110,6 +114,45 @@ class TestDestination:
         with pytest.raises(ConfigurationError, match="config object") as caught:
             Destination.parse("elabftw://user:hunter2@elab.org")
         assert "hunter2" not in str(caught.value)
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "elabftw:///api/v2",
+            "labarchives://Host/",
+            "github://lab/repo@main/x?y=1#z",
+            "file:///",
+            "file:///Users/me",
+            "x://h/a%20b",
+        ],
+    )
+    def test_normalizing_is_idempotent(self, uri: str) -> None:
+        once = Destination.parse(uri).uri
+        assert Destination.parse(once).uri == once
+
+    def test_receipt_with_an_empty_host_can_be_indexed(self) -> None:
+        # Review on #17: "elabftw:///api/v2" normalized to "elabftw:/api/v2",
+        # which SyncIndex.put then rejected.
+        receipt = Receipt(
+            destination="elabftw:///api/v2",
+            backend="elabftw",
+            container=Container(path=LogicalPath(("a",))),
+            record_id="r",
+            schema_id="test.fiber",
+            schema_version=1,
+            checksum="c",
+            conflict_token="c",
+        )
+        index = SyncIndex()
+        index.put(receipt)
+        assert SyncIndex.model_validate_json(index.model_dump_json()) == index
+
+    @pytest.mark.parametrize("bad", ["labarchives://[host/x", "x://[::1"])
+    def test_malformed_host_is_a_configuration_error(self, bad: str) -> None:
+        with pytest.raises(ConfigurationError, match="not a valid URI"):
+            Destination.parse(bad)
+        with pytest.raises(ConfigurationError):
+            connect(bad)
 
     @pytest.mark.parametrize("bad", ["/just/a/path", "", "no scheme", "1bad://x"])
     def test_rejects_non_uris(self, bad: str) -> None:
@@ -248,3 +291,39 @@ def test_any_load_failure_is_a_configuration_error(installed, loader) -> None:
     installed(FakeEntryPoint("fake", loader))
     with pytest.raises(ConfigurationError, match="fake://"):
         connect("fake://x")
+
+
+def test_two_packages_registering_one_scheme_is_an_error(installed) -> None:
+    installed(
+        FakeEntryPoint("github", lambda: TokenBackend, "metarelay.backends.github:Backend"),
+        FakeEntryPoint("github", lambda: TokenBackend, "other_pkg.github:Backend"),
+    )
+    with pytest.raises(ConfigurationError, match="Two installed packages"):
+        connect("github://lab/repo")
+
+
+def test_the_same_entry_point_listed_twice_is_fine(installed) -> None:
+    installed(
+        FakeEntryPoint("fake", lambda: TokenBackend), FakeEntryPoint("fake", lambda: TokenBackend)
+    )
+    assert connect("fake://host").destination.netloc == "host"
+
+
+def test_a_duplicate_of_another_scheme_does_not_block_this_one(installed) -> None:
+    installed(
+        FakeEntryPoint("fake", lambda: TokenBackend),
+        FakeEntryPoint("github", lambda: TokenBackend, "a:B"),
+        FakeEntryPoint("github", lambda: TokenBackend, "c:D"),
+    )
+    assert connect("fake://host").destination.netloc == "host"
+
+
+def test_broken_builtin_backend_names_the_real_error(installed) -> None:
+    def fail() -> Any:
+        raise ImportError("cannot import name 'Thing' from 'labapi.client'")
+
+    installed(FakeEntryPoint("labarchives", fail))
+    with pytest.raises(ConfigurationError) as caught:
+        auth_flow("labarchives://host")
+    assert "cannot import name 'Thing'" in str(caught.value)
+    assert "metarelay[labarchives]" in str(caught.value)
