@@ -16,9 +16,9 @@ Versioning and migrations between versions are #8. This module only answers
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, get_args
 
 import pydantic
 
@@ -49,6 +49,11 @@ class SchemaRegistry:
 
         Registering the same model twice is a no-op. Registering a different
         model under an existing ID and version raises ``ConfigurationError``.
+
+        The model, and every model nested in it, must set ``extra`` to
+        ``"forbid"`` or ``"allow"``. Pydantic's default, ``"ignore"``, would
+        accept unknown keys and then drop them from the stored payload
+        without telling anyone.
         """
         if not SCHEMA_ID_PATTERN.fullmatch(schema_id):
             raise ConfigurationError(
@@ -57,6 +62,7 @@ class SchemaRegistry:
             )
         if version < 1:
             raise ConfigurationError(f"Schema version must be 1 or higher, not {version}.")
+        _require_explicit_extra(model)
         key = (schema_id, version)
         existing = self._specs.get(key)
         if existing is not None:
@@ -111,6 +117,35 @@ class SchemaRegistry:
                 f"Payload is not valid for {schema_id} v{version}: {error}"
             ) from error
         return validated.model_dump(mode="json", by_alias=True, exclude_unset=True)
+
+
+def _require_explicit_extra(model: type[pydantic.BaseModel]) -> None:
+    for each in _models_in(model, set()):
+        if each.model_config.get("extra") not in ("forbid", "allow"):
+            raise ConfigurationError(
+                f"Schema model {each.__qualname__} must set "
+                'model_config = ConfigDict(extra="forbid") (or "allow"). '
+                "With pydantic's default, unknown keys would be silently dropped."
+            )
+
+
+def _models_in(
+    model: type[pydantic.BaseModel], seen: set[type]
+) -> Iterator[type[pydantic.BaseModel]]:
+    """``model`` and every model reachable through its field types."""
+    if model in seen:
+        return
+    seen.add(model)
+    yield model
+    for field in model.model_fields.values():
+        yield from _models_in_annotation(field.annotation, seen)
+
+
+def _models_in_annotation(annotation: Any, seen: set[type]) -> Iterator[type[pydantic.BaseModel]]:
+    if isinstance(annotation, type) and issubclass(annotation, pydantic.BaseModel):
+        yield from _models_in(annotation, seen)
+    for arg in get_args(annotation):
+        yield from _models_in_annotation(arg, seen)
 
 
 default_registry = SchemaRegistry()

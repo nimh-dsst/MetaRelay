@@ -36,6 +36,8 @@ class Site(enum.StrEnum):
 
 
 class Rich(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     count: int
     when: dt.date | None = None
     site: Site | None = None

@@ -6,10 +6,14 @@ from metarelay.core.registry import SchemaRegistry
 
 
 class Payload(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     name: str
 
 
 class OtherPayload(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     name: str
 
 
@@ -63,3 +67,39 @@ def test_validate_payload() -> None:
     registry.validate_payload("app.thing", 1, {"name": "ok"})
     with pytest.raises(ValidationError, match=r"not valid for app\.thing v1"):
         registry.validate_payload("app.thing", 1, {"name": 5})
+
+
+class Loose(pydantic.BaseModel):
+    """Pydantic's default: unknown keys are accepted, then dropped."""
+
+    name: str
+
+
+class HoldsLoose(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    items: list[Loose | None] = []
+
+
+class Allows(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="allow")
+
+    name: str
+
+
+@pytest.mark.parametrize("model", [Loose, HoldsLoose], ids=["top-level", "nested"])
+def test_schemas_that_would_silently_drop_keys_are_rejected(model) -> None:
+    with pytest.raises(ConfigurationError, match="Loose must set"):
+        SchemaRegistry().register("app.thing", 1, model)
+
+
+def test_unknown_keys_are_kept_or_rejected_never_dropped() -> None:
+    registry = SchemaRegistry()
+    registry.register("app.forbid", 1, Payload)
+    registry.register("app.allow", 1, Allows)
+    with pytest.raises(ValidationError):
+        registry.validate_payload("app.forbid", 1, {"name": "x", "notes": "kept?"})
+    assert registry.validate_payload("app.allow", 1, {"name": "x", "notes": "kept"}) == {
+        "name": "x",
+        "notes": "kept",
+    }
