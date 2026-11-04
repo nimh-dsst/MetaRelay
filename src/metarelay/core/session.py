@@ -6,6 +6,10 @@ don't inherit from anything. They provide these methods, and
 
 Every method takes and returns plain data (records, receipts, containers) and
 raises only ``metarelay`` errors.
+
+Only ``ensure_container`` creates containers. Every other method raises
+``NotFoundError`` for a container that doesn't exist, so a typo in a path is
+reported instead of looking like an empty container.
 """
 
 from __future__ import annotations
@@ -38,15 +42,20 @@ class Session(Protocol):
         ...
 
     def list_containers(self, parent: LogicalPath = ROOT) -> list[Container]:
-        """List the containers directly inside ``parent``. Not recursive."""
+        """List the containers directly inside ``parent``. Not recursive.
+
+        Raises:
+            NotFoundError: If ``parent`` does not exist.
+        """
         ...
 
     def ensure_container(self, path: LogicalPath) -> Container:
-        """Make ``path`` ready to write to, and return it.
+        """Create ``path`` and its parents if needed, and return it.
 
-        Idempotent: calling it again returns the same container. "Ready to
-        write to" does not promise an empty container exists. Git cannot store
-        empty directories, so the GitHub backend may create it on first write.
+        Idempotent: calling it again returns the same container. Afterwards the
+        container exists, even while empty: listing it returns ``[]``, not
+        ``NotFoundError``. A backend that can't store an empty container
+        (Git can't store an empty folder) writes a placeholder to make it real.
         """
         ...
 
@@ -65,6 +74,7 @@ class Session(Protocol):
 
         Raises:
             ConflictError: See ``decide_write``.
+            NotFoundError: If the container at ``path`` does not exist.
         """
         ...
 
@@ -72,12 +82,16 @@ class Session(Protocol):
         """Read one record.
 
         Raises:
-            NotFoundError: If there is no such record.
+            NotFoundError: If there is no such record or container.
         """
         ...
 
     def list_records(self, path: LogicalPath) -> list[StoredRecord]:
-        """Read every record directly inside ``path``. Not recursive."""
+        """Read every record directly inside ``path``. Not recursive.
+
+        Raises:
+            NotFoundError: If the container at ``path`` does not exist.
+        """
         ...
 
     def write_file(
@@ -91,6 +105,9 @@ class Session(Protocol):
         """Write an arbitrary file (an analysis derivative, for example).
 
         Backends may cap the size; GitHub does, by design.
+
+        Raises:
+            NotFoundError: If the container at ``path`` does not exist.
         """
         ...
 
