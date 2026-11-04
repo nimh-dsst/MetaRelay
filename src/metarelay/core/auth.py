@@ -18,7 +18,7 @@ Each backend uses one of three flows:
 
 ``LoginChallenge`` is plain data, so a web app can store it between the two
 HTTP requests. ``begin_login`` and ``complete_login`` live in
-``metarelay.core.connect`` with ``connect()``.
+``metarelay.core.backend`` with ``connect()``.
 """
 
 from __future__ import annotations
