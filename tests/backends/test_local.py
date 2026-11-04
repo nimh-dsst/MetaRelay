@@ -332,3 +332,49 @@ def test_other_record_under_a_case_folded_name_conflicts(
         session.write_record(STUDY, make_record("fiber-1"))
     with pytest.raises(NotFoundError):
         session.read_record(STUDY, "fiber-1")
+
+
+def test_files_get_normal_permissions(session: LocalSession, make_record) -> None:
+    import os
+
+    umask = os.umask(0)
+    os.umask(umask)
+    session.write_record(STUDY, make_record())
+    session.write_file(STUDY, "trace.csv", b"1")
+    for name in ("fiber-1.json", "fiber-1.md", "trace.csv", ".metarelay/index.json"):
+        assert (folder(session) / name).stat().st_mode & 0o777 == 0o666 & ~umask, name
+
+
+def test_create_works_without_hard_links(session: LocalSession, make_record, monkeypatch):
+    import os
+
+    def no_links(*args):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_links)
+    record = make_record()
+    session.write_record(STUDY, record, mode=WriteMode.CREATE)
+    assert session.read_record(STUDY, "fiber-1").record == record
+    with pytest.raises(ConflictError):
+        session.write_record(STUDY, make_record(diameter_um=1), mode=WriteMode.CREATE)
+
+
+@pytest.mark.parametrize("name", ["fiber-1.json", "fiber-1.md", "FIBER-1.JSON"])
+def test_file_cannot_overwrite_a_record_even_if_unindexed(
+    session: LocalSession, make_record, name: str
+) -> None:
+    session.write_record(STUDY, make_record())
+    index_file = folder(session) / ".metarelay" / "index.json"
+    index_file.write_text('{"records": [], "files": []}')  # entry lost
+    case_insensitive = (folder(session) / name).exists()
+    if name != name.lower() and not case_insensitive:
+        pytest.skip("This disk is case-sensitive, so FIBER-1.JSON is a different file.")
+    with pytest.raises(ConflictError):
+        session.write_file(STUDY, name, b"{}")
+    assert session.read_record(STUDY, "fiber-1")
+
+
+def test_rewriting_your_own_json_file_is_allowed(session: LocalSession) -> None:
+    session.write_file(STUDY, "summary.json", b"{}")
+    session.write_file(STUDY, "summary.json", b"[]")
+    assert (folder(session) / "summary.json").read_bytes() == b"[]"

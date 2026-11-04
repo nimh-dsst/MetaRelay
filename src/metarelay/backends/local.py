@@ -21,7 +21,8 @@ every platform, so a folder written on a Mac still copies to Windows. Names
 starting with ``.`` are reserved for MetaRelay's own files.
 
 Writes are atomic (a temporary file, then a rename), and ``create`` mode is
-enforced: two writers cannot both create the same record. Other modes assume
+enforced: two writers cannot both create the same record. (On a drive without
+hard links, such as exFAT, a ``create`` is enforced but not atomic.) Other modes assume
 one writer per container at a time
 (``list_records`` still finds every record if two writers race on the index).
 """
@@ -32,8 +33,8 @@ import contextlib
 import hashlib
 import json
 import os
-import tempfile
 import unicodedata
+import uuid
 from collections.abc import Iterator, Mapping
 from collections.abc import Set as AbstractSet
 from datetime import datetime
@@ -135,18 +136,32 @@ def _write_atomic(target: Path, data: bytes, *, exclusive: bool = False) -> None
 
     With ``exclusive``, raise ``FileExistsError`` if ``target`` exists, even if
     another process creates it at the same moment.
+
+    The file gets the usual permissions (``0o666`` minus the umask), so a
+    shared lab folder stays readable by the group. ``tempfile.mkstemp`` would
+    make every file readable only by its writer.
     """
-    handle, temp_name = tempfile.mkstemp(dir=target.parent, prefix=".tmp-")
-    temp = Path(temp_name)
+    temp = target.with_name(f".tmp-{uuid.uuid4().hex}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    handle = os.open(temp, flags, 0o666)
     try:
         with os.fdopen(handle, "wb") as file:
             file.write(data)
             file.flush()
             os.fsync(file.fileno())
-        if exclusive:
-            os.link(temp, target)  # fails if target exists; atomic
-        else:
+        if not exclusive:
             os.replace(temp, target)
+            return
+        try:
+            os.link(temp, target)  # atomic, and fails if target exists
+        except FileExistsError:
+            raise
+        except OSError:
+            # No hard links here (exFAT, some network drives). Exclusive
+            # create still never overwrites, but isn't atomic: a crash
+            # mid-write can leave a partial file, which reads as damaged.
+            with open(target, "xb") as file:
+                file.write(data)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -288,12 +303,21 @@ class LocalSession:
         data = bytes(data)
         with _disk_errors(f"write {name!r} in {self._describe(path)}"):
             index = self._load_index(folder)
-            stem, _, suffix = name.rpartition(".")
-            if suffix in {"json", "md"} and stem in index["records"]:
-                raise ConflictError(f"{name!r} would overwrite the record {stem!r}.")
             target = folder / name
             if target.is_dir():
                 raise ConflictError(f"{name!r} is a folder at the destination.")
+            # Never overwrite a record or its preview. Check the disk, not the
+            # index (an entry can be lost), and ignore case (macOS and Windows
+            # disks treat rec-1.JSON and rec-1.json as one file).
+            written_by_us = {f.casefold() for f in index["files"]}
+            if (
+                name.casefold().endswith((".json", ".md"))
+                and target.exists()
+                and name.casefold() not in written_by_us
+            ):
+                raise ConflictError(
+                    f"{name!r} would overwrite a record or preview. Use another name."
+                )
             _write_atomic(target, data)
             self._update_index(folder, files={name})
             checksum = _sha256(data)
@@ -330,9 +354,9 @@ class LocalSession:
         return f"container {str(path)!r}" if path.parts else "the destination root"
 
     def _refuse_file_name_clash(self, folder: Path, record_id: str) -> None:
-        files = self._load_index(folder)["files"]
+        files = {name.casefold() for name in self._load_index(folder)["files"]}
         for name in (f"{record_id}.json", f"{record_id}.md"):
-            if name in files:
+            if name.casefold() in files:
                 raise ConflictError(f"{name!r} is a file written with write_file, not a record.")
 
     def _checksum_on_disk(self, data: bytes, record_id: str) -> str:
@@ -350,7 +374,8 @@ class LocalSession:
         json_file = folder / f"{record_id}.json"
         missing = NotFoundError(f"No record {record_id!r} in {self._describe(path)}.")
         with _disk_errors(f"read {record_id!r} in {self._describe(path)}"):
-            if f"{record_id}.json" in self._load_index(folder)["files"]:
+            files = {name.casefold() for name in self._load_index(folder)["files"]}
+            if f"{record_id}.json".casefold() in files:
                 raise missing
             data = _read_optional(json_file)
             preview = _read_optional(folder / f"{record_id}.md")
@@ -419,7 +444,7 @@ class LocalSession:
     ) -> None:
         index = self._load_index(folder)
         new_records = set(index["records"]) | records
-        new_files = (set(index["files"]) | files) - new_records
+        new_files = set(index["files"]) | files
         meta = folder / META_DIR
         unchanged = new_records == set(index["records"]) and new_files == set(index["files"])
         if unchanged and (meta / INDEX_FILE).exists():

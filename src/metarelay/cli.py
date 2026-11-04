@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -30,6 +31,7 @@ from metarelay.core.errors import (
     ConfigurationError,
     ConflictError,
     MetaRelayError,
+    NotFoundError,
     ValidationError,
 )
 from metarelay.core.path import LogicalPath
@@ -148,6 +150,7 @@ def _run(args: argparse.Namespace, session: Session) -> int:
         record = Record.model_validate_json(_read_input(args.file))
         if args.create_path:
             session.ensure_container(path)
+        before = _checksum_at_destination(session, path, record.record_id)
         receipt = session.write_record(
             path,
             record,
@@ -156,7 +159,8 @@ def _run(args: argparse.Namespace, session: Session) -> int:
         )
         receipts.put(receipt)
         _save_receipts(args.receipts, receipts)
-        print(f"Wrote {record.record_id} ({receipt.checksum[:12]})", file=sys.stderr)
+        done = "Already up to date:" if receipt.checksum == before else "Wrote"
+        print(f"{done} {record.record_id} ({receipt.checksum[:12]})", file=sys.stderr)
         return 0
 
     # read
@@ -165,6 +169,14 @@ def _run(args: argparse.Namespace, session: Session) -> int:
     _save_receipts(args.receipts, receipts)
     print(stored.record.model_dump_json(indent=2))
     return 0
+
+
+def _checksum_at_destination(session: Session, path: LogicalPath, record_id: str) -> str | None:
+    """The checksum of the record there now, or ``None`` if there is none (or it's damaged)."""
+    try:
+        return session.read_record(path, record_id).receipt.checksum
+    except (NotFoundError, ValidationError):
+        return None
 
 
 def _import(module: str) -> None:
@@ -197,8 +209,12 @@ def _load_receipts(file: Path | None) -> SyncIndex:
 def _save_receipts(file: Path | None, receipts: SyncIndex) -> None:
     if file is None:
         return
+    # Write a temporary file, then rename it, so a crash can't leave a
+    # half-written receipts file that blocks every later run.
+    temp = file.with_name(f".{file.name}.tmp")
     try:
-        file.write_text(json.dumps(receipts.model_dump(mode="json"), indent=2) + "\n")
+        temp.write_text(json.dumps(receipts.model_dump(mode="json"), indent=2) + "\n")
+        os.replace(temp, file)
     except OSError as error:
         raise ValidationError(f"Could not save receipts to {file}: {error.strerror}.") from error
 

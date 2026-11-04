@@ -127,3 +127,17 @@ def test_write_to_a_typo_path_creates_nothing(dest: str, record_file, capsys) ->
     assert "does not exist" in capsys.readouterr().err
     main(["ls", dest])
     assert capsys.readouterr().out == "Fiber study/\n"
+
+
+def test_unchanged_write_says_so(dest: str, record_file, capsys) -> None:
+    main(["mkdir", dest, "Study"])
+    main(["write", dest, "Study", record_file(400)])
+    assert capsys.readouterr().err.startswith("Wrote fiber-1")
+    main(["write", dest, "Study", record_file(400)])
+    assert capsys.readouterr().err.startswith("Already up to date: fiber-1")
+
+
+def test_receipts_file_leaves_no_temporary_file(dest: str, record_file, tmp_path: Path) -> None:
+    main(["mkdir", dest, "Study"])
+    main(["write", dest, "Study", record_file(), "--receipts", str(tmp_path / "r.json")])
+    assert not list(tmp_path.glob(".r.json*"))
