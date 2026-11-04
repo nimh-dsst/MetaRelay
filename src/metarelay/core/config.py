@@ -35,6 +35,7 @@ from pydantic_settings import (
 )
 
 from metarelay.core.errors import ConfigurationError
+from metarelay.core.model import describe_errors
 
 __all__ = ["DestinationConfig", "TokenConfig"]
 
@@ -48,11 +49,8 @@ class DestinationConfig(BaseSettings):
         try:
             super().__init__(**values)
         except pydantic.ValidationError as error:
-            # include_input=False: the input may be a token.
-            problems = "; ".join(
-                f"{'.'.join(str(part) for part in detail['loc']) or 'config'}: {detail['msg']}"
-                for detail in error.errors(include_input=False, include_url=False)
-            )
+            # The input may be a token: never echo it, never chain it.
+            problems = describe_errors(error, "config")
             raise ConfigurationError(f"Invalid {type(self).__name__}: {problems}") from None
 
     @classmethod

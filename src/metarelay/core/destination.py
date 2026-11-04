@@ -41,6 +41,13 @@ class Destination(MetaRelayModel):
 
     @classmethod
     def parse(cls, uri: str) -> Self:
+        # First, before any message can echo the URI: receipts store it, and
+        # errors are shown and logged, so a password must go nowhere.
+        if "@" in _authority(uri):
+            raise ConfigurationError(
+                "Destination URIs cannot contain a username or password. "
+                "Pass credentials in a config object instead."
+            )
         if "://" not in uri:
             raise ConfigurationError(
                 f"Destination {uri!r} is not a URI. Use a form like file:///path/to/folder."
@@ -52,12 +59,6 @@ class Destination(MetaRelayModel):
         scheme = parts.scheme.lower()
         if not _SCHEME_PATTERN.fullmatch(scheme):
             raise ConfigurationError(f"Destination {uri!r} has an invalid scheme.")
-        if "@" in parts.netloc:
-            # Receipts store the URI, so a password in it would be saved to disk.
-            raise ConfigurationError(
-                "Destination URIs cannot contain a username or password. "
-                "Pass credentials in a config object instead."
-            )
         netloc = parts.netloc.lower()
         path = parts.path.rstrip("/")
         if scheme == "file" and not path:
@@ -73,6 +74,16 @@ class Destination(MetaRelayModel):
 
     def __str__(self) -> str:
         return self.uri
+
+
+def _authority(uri: str) -> str:
+    """The ``user:password@host`` part, found without parsing (parsing can fail).
+
+    Also covers text with no ``://``, like ``user:pw@host``. An ``@`` later
+    in the path (``github://lab/repo@main``) is not part of it.
+    """
+    after_scheme = uri.split("://", 1)[-1]
+    return re.split(r"[/?#]", after_scheme, maxsplit=1)[0]
 
 
 def normalize_destination(uri: str) -> str:
