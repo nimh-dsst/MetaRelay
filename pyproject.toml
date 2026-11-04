@@ -38,6 +38,12 @@ nwb = [
 testing = ["pytest>=9"]
 all = ["metarelay[labarchives,elabftw,github,nwb,testing]"]
 
+[project.scripts]
+metarelay = "metarelay.cli:main"
+
+[project.entry-points."metarelay.backends"]
+file = "metarelay.backends.local:LocalBackend"
+
 [project.urls]
 Repository = "https://github.com/nimh-dsst/MetaRelay"
 Issues = "https://github.com/nimh-dsst/MetaRelay/issues"
