@@ -23,6 +23,13 @@ from metarelay.core.errors import (
     ValidationError,
 )
 from metarelay.core.path import ROOT, Container, LogicalPath
+from metarelay.core.preview import (
+    Heading,
+    Preview,
+    Table,
+    register_renderer,
+    render_preview,
+)
 from metarelay.core.receipt import FileReceipt, Receipt, SyncIndex
 from metarelay.core.record import Record
 from metarelay.core.registry import SchemaRegistry, SchemaSpec, register_schema
@@ -40,11 +47,13 @@ __all__ = [
     "Destination",
     "DestinationConfig",
     "FileReceipt",
+    "Heading",
     "LogicalPath",
     "LoginChallenge",
     "MetaRelayError",
     "NotFoundError",
     "PermissionDeniedError",
+    "Preview",
     "Receipt",
     "Record",
     "SchemaRegistry",
@@ -52,6 +61,7 @@ __all__ = [
     "Session",
     "StoredRecord",
     "SyncIndex",
+    "Table",
     "TokenConfig",
     "ValidationError",
     "WriteAction",
@@ -62,5 +72,7 @@ __all__ = [
     "connect",
     "decide_write",
     "record_checksum",
+    "register_renderer",
     "register_schema",
+    "render_preview",
 ]
