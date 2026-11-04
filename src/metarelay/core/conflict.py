@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from metarelay.core.errors import ConflictError
+from metarelay.core.errors import ConflictError, ValidationError
 from metarelay.core.receipt import Receipt
 
 __all__ = ["WriteAction", "WriteMode", "decide_write"]
@@ -60,7 +60,8 @@ def decide_write(
     """Decide whether to write, skip, or refuse.
 
     Args:
-        mode: The write mode the caller asked for.
+        mode: The write mode the caller asked for, as a ``WriteMode`` or its
+            string value (``"create"``).
         local_checksum: ``record_checksum`` of the record being written.
         remote_checksum: ``record_checksum`` of the record at the destination
             now, or ``None`` if there is none.
@@ -73,7 +74,17 @@ def decide_write(
 
     Raises:
         ConflictError: If writing would overwrite changes MetaRelay did not make.
+        ValidationError: If ``mode`` is not a write mode.
     """
+    # Accept "create" as well as WriteMode.CREATE: modes often arrive as text
+    # (a CLI flag, a config file). The checks below compare with ``is``, so a
+    # plain string would match nothing and quietly act like upsert.
+    try:
+        mode = WriteMode(mode)
+    except ValueError as error:
+        modes = ", ".join(m.value for m in WriteMode)
+        raise ValidationError(f"Unknown write mode {mode!r}; expected one of {modes}.") from error
+
     if remote_checksum is None:
         return WriteAction.WRITE
 

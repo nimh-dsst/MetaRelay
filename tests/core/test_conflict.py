@@ -2,7 +2,15 @@
 
 import pytest
 
-from metarelay import ConflictError, Container, LogicalPath, Receipt, WriteAction, WriteMode
+from metarelay import (
+    ConflictError,
+    Container,
+    LogicalPath,
+    Receipt,
+    ValidationError,
+    WriteAction,
+    WriteMode,
+)
 from metarelay.core.conflict import decide_write
 
 LOCAL = "local"
@@ -108,3 +116,26 @@ class TestPreviewEdits:
 
 def test_write_mode_accepts_plain_strings() -> None:
     assert WriteMode("upsert") is WriteMode.UPSERT
+
+
+@pytest.mark.parametrize("mode", ["create", "upsert", "force"])
+def test_mode_as_a_string_acts_like_the_enum(mode: str) -> None:
+    # "create" used to fail the ``is`` checks and act like upsert.
+    for remote, prior in [(LOCAL, None), (OTHER, receipt(OTHER)), (OTHER, None)]:
+        try:
+            expected = decide(WriteMode(mode), remote=remote, prior=prior)
+        except ConflictError:
+            with pytest.raises(ConflictError):
+                decide(mode, remote=remote, prior=prior)
+        else:
+            assert decide(mode, remote=remote, prior=prior) is expected
+
+
+def test_create_as_a_string_refuses_an_existing_record() -> None:
+    with pytest.raises(ConflictError):
+        decide("create", remote=LOCAL)
+
+
+def test_unknown_mode_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="Unknown write mode 'crate'"):
+        decide("crate", remote=LOCAL)
