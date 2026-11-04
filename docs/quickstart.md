@@ -102,6 +102,7 @@ EOF
 
 mkdir -p metadata
 DEST="file://$PWD/metadata"
+metarelay mkdir "$DEST" "Fiber study/Cohort A"
 metarelay --import lab_schemas write "$DEST" "Fiber study/Cohort A" implant-M1.json \
     --receipts receipts.json
 metarelay --import lab_schemas ls "$DEST" "Fiber study/Cohort A"
@@ -117,3 +118,6 @@ metarelay --import lab_schemas read "$DEST" "Fiber study/Cohort A" implant-M1
 
 `write` takes `--mode create|upsert|force`. It exits with status 3 on a
 conflict and 1 on any other error.
+
+`write` won't create a missing container, so a typo in the path is an error
+instead of a new folder. Run `mkdir` first, or pass `--create-path`.

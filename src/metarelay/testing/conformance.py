@@ -131,6 +131,28 @@ class BackendConformance:
         listed = _paths(session.list_containers(LogicalPath(("Study",))))
         assert listed == {LogicalPath(("Study", "Cohort A")), LogicalPath(("Study", "Cohort B"))}
 
+    def test_ensured_empty_container_lists_as_empty(self, session: Session) -> None:
+        path = LogicalPath(("Empty",))
+        session.ensure_container(path)
+        assert session.list_records(path) == []
+        assert session.list_containers(path) == []
+        assert path in _paths(session.list_containers(ROOT))
+
+    def test_missing_container_is_not_found(self, session: Session, make_record) -> None:
+        # Only ensure_container creates containers, so a typo is reported.
+        missing = LogicalPath(("Missing",))
+        with pytest.raises(NotFoundError):
+            session.list_containers(missing)
+        with pytest.raises(NotFoundError):
+            session.list_records(missing)
+        with pytest.raises(NotFoundError):
+            session.read_record(missing, "rec-1")
+        with pytest.raises(NotFoundError):
+            session.write_record(missing, make_record())
+        with pytest.raises(NotFoundError):
+            session.write_file(missing, "trace.csv", b"data")
+        assert missing not in _paths(session.list_containers(ROOT))
+
     def test_names_with_spaces_and_unicode(self, session: Session, make_record) -> None:
         path = LogicalPath(("Fiber study", "Cohort ä"))
         session.ensure_container(path)

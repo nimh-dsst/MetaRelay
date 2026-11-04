@@ -35,7 +35,7 @@ def record_file(tmp_path: Path):
 
 
 def test_write_read_and_list(dest: str, record_file, capsys) -> None:
-    assert main(["write", dest, "Study/Cohort A", record_file()]) == 0
+    assert main(["write", dest, "Study/Cohort A", record_file(), "--create-path"]) == 0
     capsys.readouterr()
 
     assert main(["read", dest, "Study/Cohort A", "fiber-1"]) == 0
@@ -54,6 +54,7 @@ def test_mkdir(dest: str, capsys) -> None:
 
 
 def test_update_without_receipts_is_a_conflict(dest: str, record_file, capsys) -> None:
+    main(["mkdir", dest, "Study"])
     main(["write", dest, "Study", record_file(400)])
     assert main(["write", dest, "Study", record_file(200)]) == 3
     assert "--mode force" in capsys.readouterr().err
@@ -62,6 +63,7 @@ def test_update_without_receipts_is_a_conflict(dest: str, record_file, capsys) -
 
 def test_receipts_file_allows_updates(dest: str, record_file, tmp_path: Path) -> None:
     receipts = str(tmp_path / "receipts.json")
+    main(["mkdir", dest, "Study"])
     main(["write", dest, "Study", record_file(400), "--receipts", receipts])
     assert main(["write", dest, "Study", record_file(200), "--receipts", receipts]) == 0
     assert len(json.loads(Path(receipts).read_text())["receipts"]) == 1
@@ -78,6 +80,7 @@ def test_errors_are_short_messages(dest: str, capsys) -> None:
 def test_invalid_record_is_reported(dest: str, tmp_path: Path, capsys) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text('{"schema_id": "test.fiber", "schema_version": 1, "record_id": "x"}')
+    main(["mkdir", dest, "Study"])
     assert main(["write", dest, "Study", str(bad)]) == 1
     assert "payload" in capsys.readouterr().err
 
@@ -107,7 +110,8 @@ def test_import_registers_schemas(dest: str, tmp_path: Path, monkeypatch, capsys
         '{"schema_id": "lab.note", "schema_version": 1, "record_id": "n1",'
         ' "payload": {"text": "hi"}}'
     )
-    assert main(["--import", "lab_schemas", "write", dest, "Notes", str(note)]) == 0
+    args = ["--import", "lab_schemas", "write", dest, "Notes", str(note), "--create-path"]
+    assert main(args) == 0
 
 
 def test_broken_import_module_is_a_short_error(dest: str, tmp_path: Path, monkeypatch, capsys):
@@ -115,3 +119,11 @@ def test_broken_import_module_is_a_short_error(dest: str, tmp_path: Path, monkey
     monkeypatch.syspath_prepend(str(tmp_path))
     assert main(["--import", "broken_schemas", "ls", dest]) == 1
     assert "Could not import 'broken_schemas'" in capsys.readouterr().err
+
+
+def test_write_to_a_typo_path_creates_nothing(dest: str, record_file, capsys) -> None:
+    main(["mkdir", dest, "Fiber study"])
+    assert main(["write", dest, "Fiber stdy", record_file()]) == 1
+    assert "does not exist" in capsys.readouterr().err
+    main(["ls", dest])
+    assert capsys.readouterr().out == "Fiber study/\n"

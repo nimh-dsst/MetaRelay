@@ -71,6 +71,12 @@ def _parser() -> argparse.ArgumentParser:
         help="create: fail if it exists; upsert (default): update unless it changed "
         "remotely; force: overwrite",
     )
+    write.add_argument(
+        "--create-path",
+        action="store_true",
+        help="create the container first if it doesn't exist (otherwise a missing "
+        "container is an error, so a typo doesn't create a folder)",
+    )
     _add_receipts(write)
 
     read = commands.add_parser("read", help="print a record as JSON")
@@ -140,7 +146,8 @@ def _run(args: argparse.Namespace, session: Session) -> int:
 
     if args.command == "write":
         record = Record.model_validate_json(_read_input(args.file))
-        session.ensure_container(path)
+        if args.create_path:
+            session.ensure_container(path)
         receipt = session.write_record(
             path,
             record,
