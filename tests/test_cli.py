@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -141,3 +142,78 @@ def test_receipts_file_leaves_no_temporary_file(dest: str, record_file, tmp_path
     main(["mkdir", dest, "Study"])
     main(["write", dest, "Study", record_file(), "--receipts", str(tmp_path / "r.json")])
     assert not list(tmp_path.glob(".r.json*"))
+
+
+# Review of #18
+
+
+def test_installed_command_imports_from_the_current_folder(tmp_path: Path) -> None:
+    import shutil
+
+    script = shutil.which("metarelay", path=str(Path(sys.executable).parent))
+    if script is None:
+        pytest.skip("the metarelay console script isn't installed in this environment")
+    (tmp_path / "lab_schemas.py").write_text(
+        "import pydantic\n"
+        "from metarelay import register_schema\n"
+        "class Note(pydantic.BaseModel):\n"
+        "    model_config = pydantic.ConfigDict(extra='forbid')\n"
+        "    text: str\n"
+        "register_schema('lab.note', 1, Note)\n"
+    )
+    (tmp_path / "dest").mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    result = subprocess.run(
+        [script, "--import", "lab_schemas", "ls", (tmp_path / "dest").as_uri()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_conflict_advice_fits_the_command(dest: str, record_file, tmp_path: Path, capsys) -> None:
+    main(["mkdir", dest, "Study"])
+    main(["write", dest, "Study", record_file(400)])
+    capsys.readouterr()
+
+    assert main(["write", dest, "Study", record_file(400), "--mode", "create"]) == 3
+    err = capsys.readouterr().err
+    assert "--receipts" not in err
+    assert "--mode force" in err
+
+    receipts = str(tmp_path / "r.json")
+    main(["read", dest, "Study", "fiber-1", "--receipts", receipts])
+    (Path(dest.removeprefix("file://")) / "Study" / "fiber-1.md").write_text("edited\n")
+    capsys.readouterr()
+    assert main(["write", dest, "Study", record_file(200), "--receipts", receipts]) == 3
+    assert "--receipts" not in capsys.readouterr().err
+
+
+def test_mkdir_under_a_file_is_a_plain_error(dest: str, capsys) -> None:
+    main(["mkdir", dest, "Study"])
+    (Path(dest.removeprefix("file://")) / "Study" / "trace.csv").write_text("1")
+    assert main(["mkdir", dest, "Study/trace.csv/sub"]) == 1
+    err = capsys.readouterr().err
+    assert "'Study/trace.csv' is a file, not a folder" in err
+    assert "--mode" not in err and "--receipts" not in err
+
+
+def test_force_over_an_edited_preview_says_wrote(dest: str, record_file, capsys) -> None:
+    main(["mkdir", dest, "Study"])
+    main(["write", dest, "Study", record_file(400)])
+    preview = Path(dest.removeprefix("file://")) / "Study" / "fiber-1.md"
+    preview.write_text(preview.read_text() + "Lab note: fiber cracked\n")
+    capsys.readouterr()
+    assert main(["write", dest, "Study", record_file(400), "--mode", "force"]) == 0
+    assert capsys.readouterr().err.startswith("Wrote fiber-1")
+    assert "cracked" not in preview.read_text()
+
+
+def test_unsavable_receipts_fail_before_writing(dest: str, record_file, tmp_path: Path) -> None:
+    main(["mkdir", dest, "Study"])
+    bad = str(tmp_path / "nodir" / "r.json")
+    assert main(["write", dest, "Study", record_file(), "--receipts", bad]) == 1
+    assert not (Path(dest.removeprefix("file://")) / "Study" / "fiber-1.json").exists()

@@ -91,5 +91,14 @@ already exist.
 - Names that are unsafe on any common filesystem are rejected everywhere
   (`\ : * ? " < > |`, a trailing dot or space, `CON`, `NUL`, …). Names
   starting with `.` are reserved.
+- Names are compared ignoring case and Unicode spelling, on every OS. A name
+  that matches an existing one only that way (`study` next to `Study`, or
+  record `Implant-M1` next to `implant-M1`) is refused, so a folder behaves
+  the same on macOS, Windows and Linux.
+- Every `.json` in a container is a record, except files written with
+  `write_file`. A `.json` that isn't a valid record makes listing fail with
+  an error naming the file, rather than the record silently disappearing.
+- The same folder always gets the same destination URI (`lab data` and
+  `lab%20data`, or a symlinked path, are one destination), so receipts match.
 - `create` is enforced even with two writers. Other modes assume one writer
   per folder at a time.

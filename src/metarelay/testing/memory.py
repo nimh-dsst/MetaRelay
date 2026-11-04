@@ -80,7 +80,7 @@ class MemorySession:
         key = (path, record.record_id)
         remote = self._records.get(key)
         action = decide_write(
-            mode=WriteMode(mode),
+            mode=mode,  # decide_write rejects an unknown mode with ValidationError
             local_checksum=record_checksum(record),
             remote_checksum=record_checksum(remote.record) if remote else None,
             prior_receipt=prior_receipt,
@@ -161,11 +161,11 @@ class MemorySession:
 class MemoryBackend:
     """A ``Backend`` that opens ``MemorySession`` objects.
 
-        Not registered as an entry point, so ``connect("memory://...")`` does not
-        work in normal use. Tests can install it by
-    monkeypatching ``metarelay.core.backend.load_backend``.
-        Every ``open`` of the same URI returns the same session, so data survives
-        between ``connect`` calls within one backend object.
+    Not registered as an entry point, so ``connect("memory://...")`` does not
+    work in normal use. Tests can install it by monkeypatching
+    ``metarelay.core.backend.load_backend``. Every ``open`` of the same URI
+    returns the same session, so data survives between ``connect`` calls
+    within one backend object.
     """
 
     name = BACKEND_NAME

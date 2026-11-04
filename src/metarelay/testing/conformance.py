@@ -23,6 +23,7 @@ the default registry, so it does not depend on any real schema.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import uuid
 from collections.abc import Callable
@@ -34,7 +35,7 @@ from metarelay.core import registry as registry_module
 from metarelay.core.checksum import record_checksum
 from metarelay.core.conflict import WriteMode
 from metarelay.core.destination import Destination
-from metarelay.core.errors import ConflictError, NotFoundError
+from metarelay.core.errors import ConflictError, NotFoundError, ValidationError
 from metarelay.core.path import ROOT, Container, LogicalPath
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
@@ -322,6 +323,35 @@ class BackendConformance:
         session.write_file(container, "trace.csv", b"old")
         receipt = session.write_file(container, "trace.csv", b"new")
         assert receipt.checksum == hashlib.sha256(b"new").hexdigest()
+
+    @pytest.mark.parametrize("name", ["rec-1.json", "rec-1.md", "REC-1.json"])
+    def test_write_file_never_replaces_a_record(
+        self, session: Session, container: LogicalPath, make_record, name: str
+    ) -> None:
+        # A backend may refuse the name, or keep files apart from records,
+        # but the record must survive either way.
+        record = make_record()
+        session.write_record(container, record)
+        with contextlib.suppress(ConflictError, ValidationError):
+            session.write_file(container, name, b"{}")
+        assert session.read_record(container, "rec-1").record == record
+        assert [item.record for item in session.list_records(container)] == [record]
+
+    def test_ids_that_differ_only_in_case_never_replace_each_other(
+        self, session: Session, container: LogicalPath, make_record
+    ) -> None:
+        # Refusing Rec-1 or storing it separately are both fine; losing rec-1 isn't.
+        record = make_record("rec-1", label="lower")
+        session.write_record(container, record)
+        with contextlib.suppress(ConflictError, ValidationError):
+            session.write_record(container, make_record("Rec-1", label="upper"), mode="force")
+        assert session.read_record(container, "rec-1").record == record
+
+    def test_unknown_write_mode_is_a_validation_error(
+        self, session: Session, container: LogicalPath, make_record
+    ) -> None:
+        with pytest.raises(ValidationError):
+            session.write_record(container, make_record(), mode="Force")  # type: ignore[arg-type]
 
     def test_files_are_not_records(self, session: Session, container: LogicalPath) -> None:
         session.write_file(container, "notes.json", b"{}")

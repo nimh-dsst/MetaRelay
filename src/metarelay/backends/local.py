@@ -12,8 +12,14 @@ conformance suite in CI. Layout under the destination folder::
             ├── index.json           which files here are records; rebuilt if deleted
             └── history.jsonl        one line per write, appended
 
-The conflict token is the SHA-256 of the record's ``.json`` file, so any
-change to the file, even one that leaves the record content alone, shows up.
+The conflict token is the SHA-256 of the record's ``.json`` file, so the
+receipt changes with any edit to the file. Conflicts are decided on the
+record's content, so reformatting the JSON by hand is not a conflict.
+
+Names are compared ignoring case and Unicode spelling on every OS. A
+container, record ID or file name that matches an existing one only that way
+(``study`` next to ``Study``) is refused, so the backend behaves the same on
+macOS, Windows and Linux.
 
 Names that are unsafe on any common filesystem (``\\ : * ? " < > |``, a
 trailing dot or space, Windows device names like ``CON``) are rejected on
@@ -119,9 +125,9 @@ def _disk_errors(action: str) -> Iterator[None]:
         raise PermissionDeniedError(
             f"Could not {action}: permission denied ({error.filename})."
         ) from error
-    except NotADirectoryError as error:
-        raise ConflictError(
-            f"Could not {action}: {error.filename} is a file, not a folder."
+    except (NotADirectoryError, IsADirectoryError) as error:
+        raise ValidationError(
+            f"Could not {action}: a file and a folder have the same name ({error.filename})."
         ) from error
     except OSError as error:
         raise BackendUnavailableError(f"Could not {action}: {error.strerror or error}.") from error
@@ -173,6 +179,37 @@ def _read_optional(path: Path) -> bytes | None:
         return None
 
 
+def _nfc(name: str) -> str:
+    return unicodedata.normalize("NFC", name)
+
+
+def _fold(name: str) -> str:
+    """How names are compared: ignoring case and Unicode spelling, on every OS.
+
+    macOS and Windows disks treat ``Study``/``study`` (and the two Unicode
+    spellings of ``ä``) as one name; Linux doesn't. Comparing folded names
+    everywhere makes the backend behave the same on all three.
+    """
+    return _nfc(name).casefold()
+
+
+def _nfc_path(path: LogicalPath) -> LogicalPath:
+    return LogicalPath(tuple(_nfc(part) for part in path.parts))
+
+
+def _entries(folder: Path) -> dict[str, str]:
+    """Everything in ``folder``: NFC name -> name as stored on disk."""
+    return {_nfc(name): name for name in os.listdir(folder)}
+
+
+def _twin(entries: dict[str, str], name: str) -> str | None:
+    """A stored name equal to ``name`` once folded, but spelled differently."""
+    for nfc_name, stored in entries.items():
+        if nfc_name != name and _fold(nfc_name) == _fold(name):
+            return stored
+    return None
+
+
 class LocalSession:
     """A session on a folder. Create it with ``connect("file:///path")``."""
 
@@ -187,19 +224,21 @@ class LocalSession:
     # Containers
 
     def list_containers(self, parent: LogicalPath = ROOT) -> list[Container]:
-        folder = self._existing_folder(parent)
+        parent = _nfc_path(parent)
+        folder = self._walk(parent, create=False)
         with _disk_errors(f"list {self._describe(parent)}"):
             names = sorted(
-                entry.name
-                for entry in folder.iterdir()
-                if entry.is_dir() and not entry.name.startswith(".")
+                nfc_name
+                for nfc_name, stored in _entries(folder).items()
+                if (folder / stored).is_dir()
+                and not nfc_name.startswith(".")
+                and _name_problem(nfc_name) is None
             )
-        return [Container(path=parent / name) for name in names if _name_problem(name) is None]
+        return [Container(path=parent / name) for name in names]
 
     def ensure_container(self, path: LogicalPath) -> Container:
-        folder = self._folder(path)
-        with _disk_errors(f"create {self._describe(path)}"):
-            folder.mkdir(parents=True, exist_ok=True)
+        path = _nfc_path(path)
+        self._walk(path, create=True)
         return Container(path=path)
 
     # Records
@@ -212,20 +251,25 @@ class LocalSession:
         mode: WriteMode = WriteMode.UPSERT,
         prior_receipt: Receipt | None = None,
     ) -> Receipt:
-        mode = WriteMode(mode)
-        folder = self._existing_folder(path)
+        path = _nfc_path(path)
+        folder = self._walk(path, create=False)
         record_id = check_local_name(record.record_id, "Record ID")
-        json_file, md_file = folder / f"{record_id}.json", folder / f"{record_id}.md"
+        json_name, md_name = f"{record_id}.json", f"{record_id}.md"
+        if _name_problem(json_name):
+            raise ValidationError(f"Record ID {record_id!r} is too long to use as a file name.")
+        json_file, md_file = folder / json_name, folder / md_name
         where = f"write {record_id!r} in {self._describe(path)}"
 
         with _disk_errors(where):
-            self._refuse_file_name_clash(folder, record_id)
+            self._refuse_name_clash(folder, record_id)
+            if json_file.is_dir():
+                raise ValidationError(f"{json_name!r} is a folder at the destination.")
             remote_bytes = _read_optional(json_file)
             remote_preview = _read_optional(md_file)
             remote_checksum = None
             if remote_bytes is not None:
-                remote_checksum = self._checksum_on_disk(remote_bytes, record_id)
-            action = decide_write(
+                remote_checksum = self._checksum_on_disk(remote_bytes)
+            action = decide_write(  # also rejects an unknown mode
                 mode=mode,
                 local_checksum=record_checksum(record),
                 remote_checksum=remote_checksum,
@@ -236,6 +280,7 @@ class LocalSession:
                     else None
                 ),
             )
+            mode = WriteMode(mode)
 
             preview = render_preview(record).markdown
             if action is WriteAction.WRITE:
@@ -267,19 +312,22 @@ class LocalSession:
         return self._read(path, folder, record_id).receipt
 
     def read_record(self, path: LogicalPath, record_id: str) -> StoredRecord:
-        folder = self._existing_folder(path)
-        if _name_problem(record_id):
+        path = _nfc_path(path)
+        folder = self._walk(path, create=False)
+        if _name_problem(record_id) or _name_problem(f"{record_id}.json"):
             raise NotFoundError(f"No record {record_id!r} in {self._describe(path)}.")
         return self._read(path, folder, record_id)
 
     def list_records(self, path: LogicalPath) -> list[StoredRecord]:
-        folder = self._existing_folder(path)
+        path = _nfc_path(path)
+        folder = self._walk(path, create=False)
         with _disk_errors(f"list records in {self._describe(path)}"):
             index = self._load_index(folder)
             # Also scan, so a record whose index entry was lost (two writers
             # updating the index at once, say) still shows up.
-            ids = set(index["records"]) | set(self._scan_records(folder))
-            ids -= {name.removesuffix(".json") for name in index["files"]}
+            files = {_fold(name) for name in index["files"]}
+            ids = set(index["records"]) | set(self._scan_records(folder, files))
+            ids = {record_id for record_id in ids if _fold(f"{record_id}.json") not in files}
         found = []
         for record_id in sorted(ids):
             try:
@@ -298,25 +346,30 @@ class LocalSession:
         *,
         media_type: str | None = None,
     ) -> FileReceipt:
-        folder = self._existing_folder(path)
-        check_local_name(name, "File name")
+        path = _nfc_path(path)
+        folder = self._walk(path, create=False)
+        name = _nfc(check_local_name(name, "File name"))
         data = bytes(data)
         with _disk_errors(f"write {name!r} in {self._describe(path)}"):
             index = self._load_index(folder)
-            target = folder / name
+            entries = _entries(folder)
+            target = folder / entries.get(name, name)
             if target.is_dir():
-                raise ConflictError(f"{name!r} is a folder at the destination.")
-            # Never overwrite a record or its preview. Check the disk, not the
-            # index (an entry can be lost), and ignore case (macOS and Windows
-            # disks treat rec-1.JSON and rec-1.json as one file).
-            written_by_us = {f.casefold() for f in index["files"]}
-            if (
-                name.casefold().endswith((".json", ".md"))
-                and target.exists()
-                and name.casefold() not in written_by_us
-            ):
-                raise ConflictError(
-                    f"{name!r} would overwrite a record or preview. Use another name."
+                raise ValidationError(f"{name!r} is a folder at the destination.")
+            twin = _twin(entries, name)
+            if twin is not None:
+                raise ValidationError(
+                    f"{name!r} differs only in case from {twin!r}, which is already here. "
+                    "Use the same spelling, or another name."
+                )
+            # Never take a name that belongs to a record or its preview, even
+            # if the file is missing or the index forgot the record.
+            files = {_fold(each) for each in index["files"]}
+            record_ids = set(index["records"]) | set(self._scan_records(folder, files))
+            owned = {_fold(f"{rid}{suffix}") for rid in record_ids for suffix in (".json", ".md")}
+            if _fold(name) in owned:
+                raise ValidationError(
+                    f"{name!r} is a record's file name. Use another name for this file."
                 )
             _write_atomic(target, data)
             self._update_index(folder, files={name})
@@ -336,46 +389,82 @@ class LocalSession:
 
     # Helpers
 
-    def _folder(self, path: LogicalPath) -> Path:
-        for name in path.parts:
-            check_local_name(name, "Container name")
-        return self.root.joinpath(*path.parts)
+    def _walk(self, path: LogicalPath, *, create: bool) -> Path:
+        """The folder for ``path``, as spelled on disk. Creates it if ``create``.
 
-    def _existing_folder(self, path: LogicalPath) -> Path:
-        folder = self._folder(path)
-        if not folder.is_dir():
-            raise NotFoundError(
-                f"{self._describe(path)} does not exist. Create it first "
-                "(ensure_container(), or metarelay mkdir)."
-            )
+        A name that matches an existing one only when case or Unicode spelling
+        is ignored is refused, so ``study`` can't silently mean ``Study`` on a
+        Mac while being a different folder on Linux.
+        """
+        for part in path.parts:  # check every name before creating anything
+            check_local_name(part, "Container name")
+        folder = self.root
+        so_far: list[str] = []
+        for part in path.parts:
+            so_far.append(part)
+            here = LogicalPath(tuple(so_far))
+            with _disk_errors(f"open {self._describe(here)}"):
+                entries = _entries(folder)
+                stored = entries.get(part)
+                if stored is None:
+                    twin = _twin(entries, part)
+                    if twin is not None:
+                        raise ValidationError(
+                            f"{self._describe(here)} differs only in case from {twin!r}, "
+                            "which already exists. Use the existing spelling."
+                        )
+                    if not create:
+                        raise NotFoundError(
+                            f"{self._describe(here)} does not exist. Create it first "
+                            "(ensure_container(), or metarelay mkdir)."
+                        )
+                    (folder / part).mkdir(exist_ok=True)
+                    stored = part
+                folder = folder / stored
+                if not folder.is_dir():
+                    raise ValidationError(f"{self._describe(here)} is a file, not a folder.")
         return folder
 
     def _describe(self, path: LogicalPath) -> str:
         return f"container {str(path)!r}" if path.parts else "the destination root"
 
-    def _refuse_file_name_clash(self, folder: Path, record_id: str) -> None:
-        files = {name.casefold() for name in self._load_index(folder)["files"]}
-        for name in (f"{record_id}.json", f"{record_id}.md"):
-            if name.casefold() in files:
-                raise ConflictError(f"{name!r} is a file written with write_file, not a record.")
+    def _refuse_name_clash(self, folder: Path, record_id: str) -> None:
+        """Refuse a record whose files would collide with another name here."""
+        names = (f"{record_id}.json", f"{record_id}.md")
+        files = {_fold(name) for name in self._load_index(folder)["files"]}
+        for name in names:
+            if _fold(name) in files:
+                raise ValidationError(
+                    f"{name!r} is a file written with write_file, not a record. "
+                    "Use another record ID."
+                )
+        entries = _entries(folder)
+        for name in names:
+            twin = _twin(entries, name)
+            if twin is not None:
+                raise ValidationError(
+                    f"Record ID {record_id!r} differs only in case from {twin!r}, which is "
+                    "already here. IDs that differ only in case can't share a container."
+                )
 
-    def _checksum_on_disk(self, data: bytes, record_id: str) -> str:
+    def _checksum_on_disk(self, data: bytes) -> str:
         """``record_checksum`` of what is on disk, or a value that matches nothing."""
         try:
             on_disk = Record.model_validate_json(data)
         except ValidationError:
             return "unreadable:" + _sha256(data)
-        if on_disk.record_id != record_id:
-            # A case-insensitive disk (macOS, Windows) found "Rec-1.json" for "rec-1".
-            return "other-record:" + _sha256(data)
         return record_checksum(on_disk)
 
     def _read(self, path: LogicalPath, folder: Path, record_id: str) -> StoredRecord:
         json_file = folder / f"{record_id}.json"
         missing = NotFoundError(f"No record {record_id!r} in {self._describe(path)}.")
         with _disk_errors(f"read {record_id!r} in {self._describe(path)}"):
-            files = {name.casefold() for name in self._load_index(folder)["files"]}
-            if f"{record_id}.json".casefold() in files:
+            files = {_fold(name) for name in self._load_index(folder)["files"]}
+            if _fold(f"{record_id}.json") in files:
+                raise missing
+            # Look the name up exactly: a case-insensitive disk would open
+            # implant-M1.json for "Implant-M1".
+            if f"{record_id}.json" not in _entries(folder):
                 raise missing
             data = _read_optional(json_file)
             preview = _read_optional(folder / f"{record_id}.md")
@@ -386,7 +475,10 @@ class LocalSession:
         except ValidationError as error:
             raise ValidationError(f"{json_file} is not a valid record: {error}") from error
         if record.record_id != record_id:
-            raise missing
+            raise ValidationError(
+                f"{json_file} holds record {record.record_id!r}, not {record_id!r}. "
+                "Rename the file or fix its record_id."
+            )
         receipt = Receipt(
             destination=self.destination,
             backend=BACKEND_NAME,
@@ -405,7 +497,7 @@ class LocalSession:
     def _load_index(self, folder: Path) -> dict[str, list[str]]:
         data = _read_optional(folder / META_DIR / INDEX_FILE)
         if data is None:
-            return {"records": self._scan_records(folder), "files": []}
+            return {"records": self._scan_records(folder, set()), "files": []}
         try:
             index = json.loads(data)
             records, files = index["records"], index["files"]
@@ -421,18 +513,23 @@ class LocalSession:
                 "will rebuild it from the .json files."
             ) from error
 
-    def _scan_records(self, folder: Path) -> list[str]:
-        """Find records without an index: every ``{id}.json`` that holds record ``id``."""
+    def _scan_records(self, folder: Path, files: AbstractSet[str]) -> list[str]:
+        """Every ``{id}.json`` here that isn't a ``write_file`` output.
+
+        Not parsed: a damaged record still counts, so reading it fails loudly
+        instead of the record silently disappearing from a listing.
+        """
         found = []
-        for candidate in sorted(folder.glob("*.json")):
-            if candidate.name.startswith(".") or not candidate.is_file():
-                continue
-            try:
-                record = Record.model_validate_json(candidate.read_bytes())
-            except ValidationError:
-                continue
-            if record.record_id == candidate.stem:
-                found.append(record.record_id)
+        for name in sorted(_entries(folder)):
+            record_id = name.removesuffix(".json")
+            if (
+                name.endswith(".json")
+                and not name.startswith(".")
+                and _name_problem(record_id) is None
+                and _fold(name) not in files
+                and (folder / name).is_file()
+            ):
+                found.append(record_id)
         return found
 
     def _update_index(
@@ -443,8 +540,14 @@ class LocalSession:
         files: AbstractSet[str] = frozenset(),
     ) -> None:
         index = self._load_index(folder)
-        new_records = set(index["records"]) | records
         new_files = set(index["files"]) | files
+        # A write_file output is never a record, even one a scan picked up.
+        file_names = {_fold(name) for name in new_files}
+        new_records = {
+            record_id
+            for record_id in set(index["records"]) | records
+            if _fold(f"{record_id}.json") not in file_names
+        }
         meta = folder / META_DIR
         unchanged = new_records == set(index["records"]) and new_files == set(index["files"])
         if unchanged and (meta / INDEX_FILE).exists():
@@ -499,7 +602,10 @@ class LocalBackend:
             raise ConfigurationError(
                 f"The folder {root} does not exist. Create it first, then connect again."
             )
-        return LocalSession(root, destination.uri)
+        # One spelling per folder, so receipts are found whichever way the URI
+        # was typed: "lab data" or "lab%20data", /tmp or /private/tmp.
+        root = root.resolve()
+        return LocalSession(root, Destination.parse(root.as_uri()).uri)
 
     def begin_login(
         self, destination: Destination, redirect_url: str, config: DestinationConfig | None

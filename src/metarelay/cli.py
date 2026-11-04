@@ -22,6 +22,7 @@ import importlib
 import json
 import os
 import sys
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -109,6 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the command line. Returns the exit status."""
     args = _parser().parse_args(argv)
     try:
+        _check_receipts_file(getattr(args, "receipts", None))
         for module in args.imports:
             _import(module)
         session = connect(args.uri)
@@ -118,11 +120,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             session.close()
     except ConflictError as error:
         print(f"metarelay: conflict: {error}", file=sys.stderr)
-        print(
-            "If you wrote it earlier, pass the same --receipts file. "
-            "To overwrite it anyway, re-run with --mode force.",
-            file=sys.stderr,
-        )
+        if args.command == "write" and args.mode != WriteMode.FORCE.value:
+            if args.receipts is None and args.mode == WriteMode.UPSERT.value:
+                print("If you wrote it earlier, pass the same --receipts file.", file=sys.stderr)
+            print("To overwrite it anyway, re-run with --mode force.", file=sys.stderr)
         return 3
     except MetaRelayError as error:
         print(f"metarelay: {error}", file=sys.stderr)
@@ -150,7 +151,7 @@ def _run(args: argparse.Namespace, session: Session) -> int:
         record = Record.model_validate_json(_read_input(args.file))
         if args.create_path:
             session.ensure_container(path)
-        before = _checksum_at_destination(session, path, record.record_id)
+        before = _state_at_destination(session, path, record.record_id)
         receipt = session.write_record(
             path,
             record,
@@ -159,7 +160,8 @@ def _run(args: argparse.Namespace, session: Session) -> int:
         )
         receipts.put(receipt)
         _save_receipts(args.receipts, receipts)
-        done = "Already up to date:" if receipt.checksum == before else "Wrote"
+        unchanged = before == (receipt.checksum, receipt.conflict_token, receipt.preview_checksum)
+        done = "Already up to date:" if unchanged else "Wrote"
         print(f"{done} {record.record_id} ({receipt.checksum[:12]})", file=sys.stderr)
         return 0
 
@@ -171,15 +173,42 @@ def _run(args: argparse.Namespace, session: Session) -> int:
     return 0
 
 
-def _checksum_at_destination(session: Session, path: LogicalPath, record_id: str) -> str | None:
-    """The checksum of the record there now, or ``None`` if there is none (or it's damaged)."""
+def _state_at_destination(
+    session: Session, path: LogicalPath, record_id: str
+) -> tuple[str, str, str | None] | None:
+    """What's there now (record, file and preview fingerprints), or ``None``."""
     try:
-        return session.read_record(path, record_id).receipt.checksum
+        receipt = session.read_record(path, record_id).receipt
     except (NotFoundError, ValidationError):
         return None
+    return receipt.checksum, receipt.conflict_token, receipt.preview_checksum
+
+
+def _check_receipts_file(file: Path | None) -> None:
+    """Fail before writing anything if the receipts can't be saved afterwards."""
+    if file is None:
+        return
+    folder = file.parent
+    if not folder.is_dir():
+        raise ValidationError(f"Can't save receipts to {file}: the folder {folder} doesn't exist.")
+    if not os.access(folder, os.W_OK) or (file.exists() and not os.access(file, os.W_OK)):
+        raise ValidationError(f"Can't save receipts to {file}: permission denied.")
+
+
+def _import_path() -> None:
+    """Let --import find modules in the current folder.
+
+    ``python script.py`` puts the script's folder on the path, but an
+    installed console script doesn't, so ``--import lab_schemas`` would
+    miss ./lab_schemas.py.
+    """
+    cwd = os.getcwd()
+    if cwd not in sys.path and "" not in sys.path:
+        sys.path.insert(0, cwd)
 
 
 def _import(module: str) -> None:
+    _import_path()
     try:
         importlib.import_module(module)
     except MetaRelayError:
@@ -211,12 +240,14 @@ def _save_receipts(file: Path | None, receipts: SyncIndex) -> None:
         return
     # Write a temporary file, then rename it, so a crash can't leave a
     # half-written receipts file that blocks every later run.
-    temp = file.with_name(f".{file.name}.tmp")
+    temp = file.with_name(f".{file.name}.{uuid.uuid4().hex}.tmp")
     try:
         temp.write_text(json.dumps(receipts.model_dump(mode="json"), indent=2) + "\n")
         os.replace(temp, file)
     except OSError as error:
         raise ValidationError(f"Could not save receipts to {file}: {error.strerror}.") from error
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
 import json
+import shutil
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -234,14 +236,14 @@ def test_root_works_as_a_container(session: LocalSession, make_record) -> None:
 def test_file_cannot_overwrite_a_record(session: LocalSession, make_record) -> None:
     session.write_record(STUDY, make_record())
     for name in ("fiber-1.json", "fiber-1.md"):
-        with pytest.raises(ConflictError):
+        with pytest.raises(ValidationError):
             session.write_file(STUDY, name, b"{}")
     assert session.read_record(STUDY, "fiber-1")
 
 
 def test_record_cannot_overwrite_a_file(session: LocalSession, make_record) -> None:
     session.write_file(STUDY, "fiber-1.json", b"{}")
-    with pytest.raises(ConflictError):
+    with pytest.raises(ValidationError):
         session.write_record(STUDY, make_record(), mode=WriteMode.FORCE)
     with pytest.raises(NotFoundError):
         session.read_record(STUDY, "fiber-1")
@@ -259,7 +261,6 @@ def test_deleted_index_is_rebuilt(session: LocalSession, make_record) -> None:
     first, second = make_record("rec-1"), make_record("rec-2")
     session.write_record(STUDY, first)
     session.write_record(STUDY, second)
-    (folder(session) / "unrelated.json").write_text("{}")
     (folder(session) / ".metarelay" / "index.json").unlink()
 
     assert [item.record for item in session.list_records(STUDY)] == [first, second]
@@ -319,19 +320,18 @@ def test_unreadable_index_is_permission_denied(session: LocalSession, make_recor
         index_file.chmod(0o644)
 
 
-def test_other_record_under_a_case_folded_name_conflicts(
-    session: LocalSession, make_record
-) -> None:
-    # What a case-insensitive disk shows: fiber-1.json holds record "Fiber-1".
-    session.write_record(STUDY, make_record("Fiber-1"))
-    other = folder(session) / "Fiber-1.json"
-    target = folder(session) / "fiber-1.json"
-    if not target.exists():
-        other.rename(target)
-    with pytest.raises(ConflictError):
-        session.write_record(STUDY, make_record("fiber-1"))
+def test_ids_that_differ_only_in_case_are_refused(session: LocalSession, make_record) -> None:
+    # Same behavior on every OS: on a Mac these would be one file, and
+    # --mode force would replace the other record.
+    original = make_record("Fiber-1")
+    session.write_record(STUDY, original)
+    for mode in WriteMode:
+        with pytest.raises(ValidationError, match="differs only in case"):
+            session.write_record(STUDY, make_record("fiber-1"), mode=mode)
     with pytest.raises(NotFoundError):
         session.read_record(STUDY, "fiber-1")
+    assert session.read_record(STUDY, "Fiber-1").record == original
+    assert [p.name for p in folder(session).glob("*.json")] == ["Fiber-1.json"]
 
 
 def test_files_get_normal_permissions(session: LocalSession, make_record) -> None:
@@ -366,10 +366,7 @@ def test_file_cannot_overwrite_a_record_even_if_unindexed(
     session.write_record(STUDY, make_record())
     index_file = folder(session) / ".metarelay" / "index.json"
     index_file.write_text('{"records": [], "files": []}')  # entry lost
-    case_insensitive = (folder(session) / name).exists()
-    if name != name.lower() and not case_insensitive:
-        pytest.skip("This disk is case-sensitive, so FIBER-1.JSON is a different file.")
-    with pytest.raises(ConflictError):
+    with pytest.raises(ValidationError):
         session.write_file(STUDY, name, b"{}")
     assert session.read_record(STUDY, "fiber-1")
 
@@ -378,3 +375,122 @@ def test_rewriting_your_own_json_file_is_allowed(session: LocalSession) -> None:
     session.write_file(STUDY, "summary.json", b"{}")
     session.write_file(STUDY, "summary.json", b"[]")
     assert (folder(session) / "summary.json").read_bytes() == b"[]"
+
+
+# Review of #18: one name rule on every OS
+
+
+def test_file_named_like_a_record_in_another_case_is_refused(
+    session: LocalSession, make_record
+) -> None:
+    # On Linux, Rec-1.json was a separate file that then locked rec-1 out.
+    record = make_record("rec-1")
+    session.write_record(STUDY, record)
+    with pytest.raises(ValidationError):
+        session.write_file(STUDY, "Rec-1.json", b"{}")
+    assert session.read_record(STUDY, "rec-1").record == record
+    session.write_record(STUDY, make_record("rec-1", diameter_um=1), mode=WriteMode.FORCE)
+
+
+def test_missing_preview_name_still_belongs_to_the_record(
+    session: LocalSession, make_record
+) -> None:
+    session.write_record(STUDY, make_record("rec-1"))
+    (folder(session) / "rec-1.md").unlink()
+    with pytest.raises(ValidationError, match="record's file name"):
+        session.write_file(STUDY, "rec-1.md", b"notes")
+    session.write_record(STUDY, make_record("rec-1", diameter_um=1), mode=WriteMode.FORCE)
+
+
+def test_damaged_record_fails_loudly_without_an_index(session: LocalSession, make_record) -> None:
+    session.write_record(STUDY, make_record("rec-1"))
+    session.write_record(STUDY, make_record("rec-2"))
+    (folder(session) / "rec-2.json").write_text("{truncated")
+    shutil.rmtree(folder(session) / ".metarelay")
+    with pytest.raises(ValidationError, match=r"rec-2\.json is not a valid record"):
+        session.list_records(STUDY)
+
+
+def test_unindexed_damaged_record_fails_loudly(session: LocalSession, make_record) -> None:
+    session.write_record(STUDY, make_record("rec-1"))
+    (folder(session) / "rec-9.json").write_text("{}")  # copied in by hand
+    with pytest.raises(ValidationError, match=r"rec-9\.json"):
+        session.list_records(STUDY)
+
+
+def test_record_file_holding_another_id_fails_loudly(session: LocalSession, make_record) -> None:
+    session.write_record(STUDY, make_record("rec-1"))
+    (folder(session) / "rec-1.json").rename(folder(session) / "rec-2.json")
+    with pytest.raises(ValidationError, match="holds record 'rec-1', not 'rec-2'"):
+        session.list_records(STUDY)
+
+
+@pytest.mark.parametrize("spelling", ["raw", "encoded", "symlink"])
+def test_one_folder_has_one_destination(tmp_path: Path, make_record, spelling: str) -> None:
+    # Receipts are keyed by destination, so every spelling must match.
+    real = tmp_path / "lab data"
+    real.mkdir()
+    canonical = connect(real.as_uri()).destination
+    if spelling == "raw":
+        uri = f"file://{real.as_posix()}"
+    elif spelling == "encoded":
+        uri = real.as_uri()
+    else:
+        (tmp_path / "alias").symlink_to(real)
+        uri = (tmp_path / "alias").as_uri()
+    session = connect(uri)
+    assert session.destination == canonical
+
+    session.ensure_container(STUDY)
+    receipt = connect(canonical).write_record(STUDY, make_record(diameter_um=400))
+    session.write_record(STUDY, make_record(diameter_um=200), prior_receipt=receipt)
+
+
+def test_unicode_spellings_of_a_container_are_one_container(
+    session: LocalSession, make_record
+) -> None:
+    nfd = LogicalPath((unicodedata.normalize("NFD", "Kohorte ä"),))
+    nfc = LogicalPath((unicodedata.normalize("NFC", "Kohorte ä"),))
+    assert nfd != nfc
+    session.ensure_container(nfd)
+    assert session.ensure_container(nfc).path == nfc
+    record = make_record()
+    receipt = session.write_record(nfc, record)
+    assert receipt.container.path == nfc
+    assert [c.path for c in session.list_containers(ROOT) if "Kohorte" in str(c.path)] == [nfc]
+    assert session.read_record(nfd, "fiber-1").record == record
+    session.write_record(nfd, make_record(diameter_um=1), prior_receipt=receipt)
+
+
+def test_container_that_differs_only_in_case_is_refused(session: LocalSession) -> None:
+    with pytest.raises(ValidationError, match="differs only in case"):
+        session.ensure_container(LogicalPath(("study",)))
+    with pytest.raises(ValidationError, match="differs only in case"):
+        session.list_records(LogicalPath(("STUDY",)))
+
+
+def test_container_under_a_file_names_the_file(session: LocalSession) -> None:
+    session.write_file(STUDY, "trace.csv", b"1")
+    with pytest.raises(ValidationError, match=r"'Study/trace\.csv' is a file, not a folder"):
+        session.ensure_container(LogicalPath(("Study", "trace.csv", "sub")))
+
+
+def test_folder_with_a_record_name_is_refused(session: LocalSession, make_record) -> None:
+    (folder(session) / "fiber-1.json").mkdir()
+    with pytest.raises(ValidationError, match="is a folder"):
+        session.write_record(STUDY, make_record())
+
+
+@pytest.mark.parametrize("length", [250, 251, 255, 300])
+def test_record_id_too_long_for_a_file_name(
+    session: LocalSession, make_record, length: int
+) -> None:
+    record_id = "r" * length
+    if length <= 250:
+        session.write_record(STUDY, make_record(record_id))
+        assert session.read_record(STUDY, record_id)
+        return
+    with pytest.raises(ValidationError):
+        session.write_record(STUDY, make_record(record_id))
+    with pytest.raises(NotFoundError):
+        session.read_record(STUDY, record_id)
