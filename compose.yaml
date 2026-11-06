@@ -1,0 +1,36 @@
+# The MetaRelay dev stack: ELN backends to develop and demo against, with no
+# real credentials. Start it with `docker compose up`.
+#
+# Point MetaRelay (or Chronoxiv) at the fake LabArchives with:
+#   METARELAY_LABARCHIVES_AKID=fake-akid
+#   METARELAY_LABARCHIVES_AKPASS=fake-akpass
+#   METARELAY_LABARCHIVES_API_URL=http://localhost:8080   (or $FAKE_LABARCHIVES_PORT)
+#   destination labarchives://localhost:8080
+# Chronoxiv uses labapi directly: API_URL=http://localhost:8080 with
+# ACCESS_KEYID/ACCESS_PWD set to the same pair. Log in as demo@example.org;
+# the fake's login page logs you in without a password.
+#
+# The eLabFTW instance (elabftw/elabimg:6.0.9) joins this file in #6.
+
+services:
+  fake-labarchives:
+    build:
+      context: .
+      dockerfile: docker/fake-labarchives/Dockerfile
+    ports:
+      - "${FAKE_LABARCHIVES_PORT:-8080}:8080"
+    environment:
+      FAKE_LABARCHIVES_AKID: fake-akid
+      FAKE_LABARCHIVES_AKPASS: fake-akpass
+    volumes:
+      # Edit the seed to change the starting notebooks; restart to reset state.
+      - ./docker/fake-labarchives/seed.json:/seed/seed.json:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u, urllib.error as e\ntry: u.urlopen('http://127.0.0.1:8080/api/users/max_file_size')\nexcept e.HTTPError: pass"
+      interval: 5s
+      timeout: 3s
+      retries: 5
