@@ -260,6 +260,12 @@ class FakeLabArchives:
             entry.content = content
             entry.version += 1
 
+    def delete_entry(self, eid: str) -> None:
+        """Delete an entry, as a person would in the web app (labapi can't)."""
+        with self._lock:
+            self._entry(eid)
+            del self._entries[eid]
+
     def entries_on(self, page_id: str) -> list[dict[str, Any]]:
         """A page's entries as plain dicts, for tests to inspect."""
         with self._lock:
