@@ -246,6 +246,28 @@ def _escape_name(name: str) -> str:
     return escape(name)[0] if escape is not None else name
 
 
+def _addressable(name: str) -> bool:
+    """Whether ``name`` can be part of a LogicalPath.
+
+    LabArchives allows names MetaRelay can't address, like a dated folder
+    ``11/12/2026``. Listings skip them instead of failing on them.
+    """
+    try:
+        LogicalPath((name,))
+    except ValidationError:
+        return False
+    return True
+
+
+def _same_name(stored: str, wanted: str) -> bool:
+    """Whether a LabArchives name is ``wanted``, ignoring Unicode spelling.
+
+    ``ä`` can be stored as one character or as ``a`` plus a combining mark;
+    the local backend treats both as one name, and so does this one.
+    """
+    return unicodedata.normalize("NFC", stored) == unicodedata.normalize("NFC", wanted)
+
+
 def _container(path: LogicalPath, node: Any) -> Container:
     return Container(path=path, native_id=node.id, holds_records=not node.is_dir())
 
@@ -290,6 +312,7 @@ class LabArchivesSession:
                 return [
                     Container(path=LogicalPath((notebook.name,)), native_id=notebook.id)
                     for notebook in self._user.notebooks.all_values()
+                    if _addressable(notebook.name)
                 ]
             _, node = self._walk(parent, create=False)
             if not node.is_dir():
@@ -297,7 +320,7 @@ class LabArchivesSession:
             return [
                 _container(parent / child.name, child)
                 for child in node.children
-                if _is_container(child)
+                if _is_container(child) and _addressable(child.name)
             ]
 
     def ensure_container(self, path: LogicalPath, *, holds_records: bool = False) -> Container:
@@ -323,6 +346,11 @@ class LabArchivesSession:
     ) -> Receipt:
         if path == ROOT:
             raise ValidationError("Records go inside a notebook, not at the root.")
+        if prior_receipt is not None and prior_receipt.record_id != record.record_id:
+            # Its preview ID would point this write at the other record's preview.
+            raise ValidationError(
+                f"prior_receipt is for {prior_receipt.record_id!r}, not {record.record_id!r}."
+            )
         where = f"write {record.record_id!r} in {self._describe(path)}"
         with _labarchives_errors(where):
             notebook, node = self._walk(path, create=False, prefer_page=True)
@@ -479,7 +507,9 @@ class LabArchivesSession:
         notebook since.
         """
         notebook_name, *names = path.parts
-        notebooks = [nb for nb in self._user.notebooks.all_values() if nb.name == notebook_name]
+        notebooks = [
+            nb for nb in self._user.notebooks.all_values() if _same_name(nb.name, notebook_name)
+        ]
         if len(notebooks) > 1:
             raise ConflictError(
                 f"You have more than one notebook named {notebook_name!r}. "
@@ -497,7 +527,7 @@ class LabArchivesSession:
         for depth, name in enumerate(names, start=2):
             here = LogicalPath(path.parts[:depth])
             last = depth == len(path.parts)
-            named = [child for child in node.children if child.name == name]
+            named = [child for child in node.children if _same_name(child.name, name)]
             dirs = [child for child in named if child.is_dir()]
             pages = [child for child in named if _is_container(child) and not child.is_dir()]
             # Middle names can only be folders. For the last name, records use a
@@ -538,17 +568,32 @@ class LabArchivesSession:
         return self._page(node, RECORDS_PAGE, create=create)
 
     def _page(self, node: Any, name: str, *, create: bool) -> Any | None:
-        pages = [child for child in node.children if not child.is_dir() and child.name == name]
-        if len(pages) > 1:
+        """The folder's own page called ``name`` (records or files).
+
+        Two writers can each find no page and each make one. So after making
+        it, read the folder again, and when there are several, every writer
+        settles on the same one: the one with entries, or else the lowest ID.
+        The extra page stays, empty; labapi can't delete a page, only move it
+        to a visible "API Deleted Items" folder.
+        """
+        pages = self._pages_named(node, name)
+        if not pages and create:
+            node.create(labapi.NotebookPage, name)
+            node.refresh()
+            pages = self._pages_named(node, name)
+        if len(pages) <= 1:
+            return pages[0] if pages else None
+        in_use = [page for page in pages if len(page.entries)]
+        if len(in_use) > 1:
             raise ConflictError(
-                f"More than one page named {name!r} in {node.name!r}. "
-                "Rename one in LabArchives first."
+                f"More than one page named {name!r} in {node.name!r} has entries. "
+                "Move them onto one page in LabArchives first."
             )
-        if pages:
-            return pages[0]
-        if create:
-            return node.create(labapi.NotebookPage, name)
-        return None
+        return in_use[0] if in_use else min(pages, key=lambda page: page.id)
+
+    @staticmethod
+    def _pages_named(node: Any, name: str) -> list[Any]:
+        return [child for child in node.children if not child.is_dir() and child.name == name]
 
     def _saved_checksum(self, page: Any, entry_id: str) -> str:
         """``preview_checksum`` of a text entry as LabArchives saved it."""

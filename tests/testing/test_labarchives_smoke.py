@@ -145,6 +145,25 @@ def test_probe_network_failure_is_a_short_error_without_the_signature(
     assert "SECRET" not in err
 
 
+def test_marker_check_network_failure_leaks_no_signature() -> None:
+    import requests
+
+    from metarelay.backends.labarchives import LabArchivesSession
+    from metarelay.core.errors import BackendUnavailableError
+    from metarelay.core.path import LogicalPath
+    from metarelay.testing.labarchives_smoke import _marker_kept
+
+    def fail(*args, **kwargs):
+        raise requests.ConnectionError("GET http://x/api/tree_tools/get_tree_level?sig=SECRET")
+
+    session = LabArchivesSession.__new__(LabArchivesSession)
+    session._walk = fail  # type: ignore[method-assign]
+    with pytest.raises(BackendUnavailableError) as caught:
+        _marker_kept(session, LogicalPath(("Lab Notebook", "smoke")), "smoke-1")
+    assert "SECRET" not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
 # Recording cassettes
 
 

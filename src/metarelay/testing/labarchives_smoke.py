@@ -47,7 +47,12 @@ import labapi
 import pydantic
 import requests
 
-from metarelay.backends.labarchives import RECORDS_PAGE, LabArchivesSession, _marker
+from metarelay.backends.labarchives import (
+    RECORDS_PAGE,
+    LabArchivesSession,
+    _labarchives_errors,
+    _marker,
+)
 from metarelay.core import registry as registry_module
 from metarelay.core.backend import begin_login, complete_login
 from metarelay.core.errors import ConflictError, MetaRelayError, ValidationError
@@ -216,9 +221,12 @@ def _marker_kept(session: Session, folder: LogicalPath, record_id: str) -> bool 
     """
     if not isinstance(session, LabArchivesSession):
         return None
-    _, node = session._walk(folder, create=False)  # type: ignore[attr-defined]
-    page = session._records_page(node, create=False)  # type: ignore[attr-defined]
-    _, preview, _ = session._find(page, record_id)  # type: ignore[attr-defined]
+    # Outside the backend's own methods, so translate labapi and network
+    # errors here too: a raw ``requests`` error would print the signed URL.
+    with _labarchives_errors("check the preview marker"):
+        _, node = session._walk(folder, create=False)  # type: ignore[attr-defined]
+        page = session._records_page(node, create=False)  # type: ignore[attr-defined]
+        _, preview, _ = session._find(page, record_id)  # type: ignore[attr-defined]
     return preview is not None and preview.content.startswith(_marker(record_id))
 
 

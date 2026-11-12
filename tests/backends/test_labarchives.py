@@ -415,6 +415,47 @@ def test_two_folders_with_the_same_name_are_ambiguous(
         session.list_containers(STUDY)
 
 
+def test_names_metarelay_cannot_address_are_left_out_of_listings(
+    session: LabArchivesSession, fake: FakeLabArchives
+) -> None:
+    # A dated folder like "11/12/2026" must not make the rest unlistable.
+    notebook = session.list_containers(ROOT)[0]
+    fake.add_node(notebook.native_id, "0", "Cohort A/B", is_page=False)
+    fake.add_node(notebook.native_id, "0", "11/12/2026", is_page=True)
+    fake.add_node(notebook.native_id, "0", " padded ", is_page=False)
+    fake.add_notebook(EMAIL, "2026/27")
+    assert {c.name for c in session.list_containers(LogicalPath((NOTEBOOK,)))} == {"Study"}
+    assert {c.name for c in session.list_containers(ROOT)} == {NOTEBOOK}
+
+
+def test_names_match_whatever_their_unicode_spelling(
+    session: LabArchivesSession, fake: FakeLabArchives, base_url: str, make_record
+) -> None:
+    # "Mäuse" typed on one machine and on another can arrive as two spellings.
+    composed, decomposed = "M\u00e4use", "Ma\u0308use"
+    notebook = session.list_containers(ROOT)[0]
+    fake.add_node(notebook.native_id, "0", composed, is_page=False)
+    fake.add_notebook(EMAIL, "Notizbuch f\u00fcr Ma\u0308use")
+    session.ensure_container(LogicalPath((NOTEBOOK, decomposed)))
+    names = [c.name for c in session.list_containers(LogicalPath((NOTEBOOK,)))]
+    assert names.count(composed) == 1 and decomposed not in names
+    session.write_record(LogicalPath((NOTEBOOK, decomposed)), make_record())
+    assert session.read_record(LogicalPath((NOTEBOOK, composed)), "fiber-1")
+    fresh = login(base_url)  # the notebook list is read at login
+    fresh.ensure_container(LogicalPath(("Notizbuch fu\u0308r M\u00e4use", "Study")))
+
+
+def test_a_receipt_for_another_record_is_refused(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    # Its preview ID would point the write at the other record's preview.
+    first = session.write_record(STUDY, make_record("a"))
+    before = records_page(fake, first)
+    with pytest.raises(ValidationError, match=r"'a'.*'b'"):
+        session.write_record(STUDY, make_record("b"), prior_receipt=first)
+    assert records_page(fake, first) == before
+
+
 def test_records_at_the_root_are_refused(session: LabArchivesSession, make_record) -> None:
     with pytest.raises(ValidationError, match="notebook"):
         session.write_record(ROOT, make_record())
@@ -600,6 +641,83 @@ def test_duplicate_record_entries_are_a_conflict(
 
 
 # Files
+
+
+def another_writer_makes_a_records_page(
+    monkeypatch, fake: FakeLabArchives, *, before_ours: bool, with_entry: bool
+) -> list[str]:
+    """When MetaRelay makes a records page, another writer makes one too.
+
+    Returns the other writer's page ID once it exists.
+    """
+    theirs: list[str] = []
+    insert = fake._insert_node
+
+    def racing_insert(user, query):
+        def make_theirs() -> None:
+            page = fake.add_node(query["nbid"], query["parent_tree_id"], RECORDS_PAGE, is_page=True)
+            if with_entry:
+                fake.add_text_entry(page, "<p>the other writer's preview</p>")
+            theirs.append(page)
+
+        if query.get("display_text") != RECORDS_PAGE:
+            return insert(user, query)
+        if before_ours:
+            make_theirs()
+        reply = insert(user, query)
+        if not before_ours:
+            make_theirs()
+        return reply
+
+    monkeypatch.setattr(fake, "_insert_node", racing_insert)
+    return theirs
+
+
+@pytest.mark.parametrize("before_ours", [True, False])
+def test_two_writers_making_the_records_page_settle_on_one(
+    session: LabArchivesSession,
+    fake: FakeLabArchives,
+    base_url: str,
+    monkeypatch,
+    make_record,
+    before_ours: bool,
+) -> None:
+    theirs = another_writer_makes_a_records_page(
+        monkeypatch, fake, before_ours=before_ours, with_entry=False
+    )
+    receipt = session.write_record(STUDY, make_record("a"))
+    # Both pages were empty when this writer chose, so it took the lowest ID,
+    # which is the one the other writer will choose too.
+    [ours] = [
+        n.tree_id for n in fake._nodes.values() if n.name == RECORDS_PAGE and n.tree_id != theirs[0]
+    ]
+    assert receipt.backend_ids["page_id"] == (theirs[0] if before_ours else ours)
+    other = login(base_url)
+    other.write_record(STUDY, make_record("b"))
+    assert len(records_page(fake, receipt)) == 4
+    assert {r.record.record_id for r in session.list_records(STUDY)} == {"a", "b"}
+
+
+def test_a_records_page_made_at_the_same_time_with_entries_is_used(
+    session: LabArchivesSession, fake: FakeLabArchives, monkeypatch, make_record
+) -> None:
+    # The other writer's page came second but already has its record on it.
+    theirs = another_writer_makes_a_records_page(
+        monkeypatch, fake, before_ours=False, with_entry=True
+    )
+    receipt = session.write_record(STUDY, make_record("a"))
+    assert receipt.backend_ids["page_id"] == theirs[0]
+
+
+def test_two_records_pages_with_entries_are_a_conflict(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    receipt = session.write_record(STUDY, make_record("a"))
+    study = fake._nodes[receipt.backend_ids["page_id"]].parent_id
+    extra = fake.add_node(receipt.backend_ids["notebook_id"], study, RECORDS_PAGE, is_page=True)
+    fake.add_text_entry(extra, "<p>someone's notes</p>")
+    with pytest.raises(ConflictError, match="has entries"):
+        session.read_record(STUDY, "a")
 
 
 def test_files_go_on_their_own_page(
