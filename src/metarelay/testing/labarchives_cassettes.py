@@ -148,6 +148,35 @@ def xml_shapes(interactions: list[Mapping[str, Any]]) -> dict[str, set[str]]:
     return shapes
 
 
+def error_codes(interactions: list[Mapping[str, Any]]) -> dict[str, set[str]]:
+    """For each API call, the error codes seen in its error responses."""
+    codes: dict[str, set[str]] = {}
+    for interaction in interactions:
+        if interaction["status"] == 200 or not interaction["body"].lstrip().startswith("<"):
+            continue
+        try:
+            code = ElementTree.fromstring(interaction["body"].encode()).findtext("error-code")
+        except ElementTree.ParseError:
+            continue
+        if code:
+            codes.setdefault(interaction["api"], set()).add(code.strip())
+    return codes
+
+
+def compare_error_codes(*, live: Mapping[str, set[str]], fake: Mapping[str, set[str]]) -> list[str]:
+    """Calls that failed in both runs, but with different error codes.
+
+    The smoke script asks for a missing folder on purpose, so this checks the
+    fake's not-found code against LabArchives' real one.
+    """
+    return [
+        f"{api}: LabArchives answered error {', '.join(sorted(live[api]))}; "
+        f"the fake answered {', '.join(sorted(fake[api]))}."
+        for api in sorted(live.keys() & fake.keys())
+        if live[api] != fake[api]
+    ]
+
+
 def compare_shapes(*, live: Mapping[str, set[str]], fake: Mapping[str, set[str]]) -> list[str]:
     """Where the fake's responses differ in shape from LabArchives'.
 

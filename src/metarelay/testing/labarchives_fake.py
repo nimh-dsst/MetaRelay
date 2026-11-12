@@ -30,7 +30,7 @@ or run it on its own (the ``docker compose`` dev stack does this)::
 
 The fake implements only what ``labapi`` uses, and its error codes and
 element names come from reading ``labapi``'s parser. Responses DSST captures
-from the real service (see ``scripts/labarchives_smoke.py``) are the check on
+from the real service (``python -m metarelay.testing.labarchives_smoke``) are the check on
 it: wherever they disagree, the fake is wrong.
 
 Standard library only, so it runs without ``labapi`` installed.
@@ -47,6 +47,7 @@ import itertools
 import json
 import mimetypes
 import os
+import re
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -72,6 +73,8 @@ SESSION_EXPIRED = 4533
 # documented; captured responses should replace them.
 NOT_FOUND = 4404
 BAD_REQUEST = 4400
+# Documented by labapi: the signed-in account is not the notebook's owner.
+NOT_OWNER = 4547
 
 
 class FakeLabArchivesError(Exception):
@@ -139,11 +142,15 @@ class FakeLabArchives:
         self.calls: list[tuple[str, str]] = []
         """Every API call answered, as ``(class, method)``, for tests to inspect."""
         self.max_file_size = 100 * 1024 * 1024
+        self.strip_html_comments = False
+        """Remove ``<!-- ... -->`` from text entries when saving them, as
+        LabArchives may (unconfirmed; the smoke test checks it live)."""
         self._users: dict[str, _User] = {}
         self._notebooks: dict[str, str] = {}
         self._nodes: dict[str, _Node] = {}
         self._entries: dict[str, _Entry] = {}
         self._ids = itertools.count(1)
+        self._failures: dict[str, FakeLabArchivesError] = {}
         self._lock = threading.RLock()
 
     # Setting up state
@@ -266,6 +273,17 @@ class FakeLabArchives:
             self._entry(eid)
             del self._entries[eid]
 
+    def fail_next(
+        self,
+        method: str,
+        code: int,
+        description: str,
+        status: HTTPStatus = HTTPStatus.FORBIDDEN,
+    ) -> None:
+        """Answer the next call to API ``method`` (``insert_node``, say) with an error."""
+        with self._lock:
+            self._failures[method] = FakeLabArchivesError(code, description, status)
+
     def entries_on(self, page_id: str) -> list[dict[str, Any]]:
         """A page's entries as plain dicts, for tests to inspect."""
         with self._lock:
@@ -297,6 +315,9 @@ class FakeLabArchives:
             self._check_signature(query, method)
             with self._lock:
                 self.calls.append((api_class, method))
+                failure = self._failures.pop(method, None)
+                if failure is not None:
+                    raise failure
                 if content_type.startswith("application/x-www-form-urlencoded"):
                     form = dict(parse_qsl(body.decode(), keep_blank_values=True))
                 else:
@@ -308,6 +329,9 @@ class FakeLabArchives:
                 f"<error-description>{escape(error.description)}</error-description></error>"
             )
             return error.status, {"Content-Type": "application/xml"}, xml.encode()
+
+    def _saved_text(self, html: str) -> str:
+        return re.sub(r"<!--.*?-->", "", html, flags=re.S) if self.strip_html_comments else html
 
     def _check_signature(self, query: Mapping[str, str], signed: str) -> None:
         if not self.verify_signatures:
@@ -373,7 +397,7 @@ class FakeLabArchives:
                 return _xml(self._add_entry(user, query, form))
             case "entries", "update_entry":
                 entry = self._owned_entry(user, query.get("eid", ""))
-                entry.data = form.get("entry_data", "")
+                entry.data = self._saved_text(form.get("entry_data", ""))
                 entry.version += 1
                 return _xml(_entry_xml(entry))
             case "entries", "add_attachment":
@@ -464,7 +488,10 @@ class FakeLabArchives:
         page = self._owned_page(user, query.get("pid", ""))
         eid = f"E{next(self._ids)}"
         part_type = query.get("part_type", "") or "text entry"
-        self._entries[eid] = _Entry(eid, page.tree_id, part_type, form.get("entry_data", ""))
+        data = form.get("entry_data", "")
+        if part_type == "text entry":
+            data = self._saved_text(data)
+        self._entries[eid] = _Entry(eid, page.tree_id, part_type, data)
         return _entry_xml(self._entries[eid], wrap="entries")
 
     def _add_attachment(self, user: _User, query: Mapping[str, str], body: bytes) -> str:

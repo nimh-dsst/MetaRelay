@@ -15,7 +15,9 @@ from metarelay.testing.labarchives_fake import FakeLabArchives, serve_fake
 pytest.importorskip("labapi")
 
 from metarelay.testing.labarchives_cassettes import (
+    compare_error_codes,
     compare_shapes,
+    error_codes,
     load_cassette,
     xml_shapes,
 )
@@ -64,6 +66,48 @@ def test_smoke_passes_against_the_fake(base_url: str, capsys) -> None:
     out = capsys.readouterr().out
     assert "All smoke checks passed" in out
     assert "conflict" in out
+    assert "LabArchives keeps HTML comments" in out
+    assert "updated in place" in out
+    assert "can't contain folders" in out
+    assert "missing folder with error code 4404" in out
+
+
+def test_smoke_reports_stripped_comments_and_still_passes(monkeypatch, capsys) -> None:
+    # If LabArchives drops HTML comments when it saves an entry, the caption
+    # still finds the preview; the smoke run says so instead of failing.
+    fake = FakeLabArchives(akid=AKID, akpass=AKPASS)
+    fake.add_user(EMAIL, auth_code=CODE, notebooks=["Lab Notebook"])
+    fake.strip_html_comments = True
+    with serve_fake(fake) as url:
+        monkeypatch.setenv("METARELAY_LABARCHIVES_AKID", AKID)
+        monkeypatch.setenv("METARELAY_LABARCHIVES_AKPASS", AKPASS)
+        monkeypatch.setenv("METARELAY_LABARCHIVES_API_URL", url)
+        assert run_smoke(url) == 0
+    out = capsys.readouterr().out
+    assert "removes HTML comments" in out
+    assert "All smoke checks passed" in out
+
+
+def test_check_edits_catches_an_edit_made_by_hand(monkeypatch, capsys) -> None:
+    fake = FakeLabArchives(akid=AKID, akpass=AKPASS)
+    fake.add_user(EMAIL, auth_code=CODE, notebooks=["Lab Notebook"])
+
+    def edit_the_preview(prompt: str = "") -> str:
+        [entry] = [
+            entry
+            for entry in fake._entries.values()
+            if entry.data.startswith("<!-- metarelay-record:smoke-1 -->")
+        ]
+        fake.edit_entry(entry.eid, entry.data.replace("second", "changed by hand"))
+        return ""
+
+    monkeypatch.setattr("builtins.input", edit_the_preview)
+    with serve_fake(fake) as url:
+        monkeypatch.setenv("METARELAY_LABARCHIVES_AKID", AKID)
+        monkeypatch.setenv("METARELAY_LABARCHIVES_AKPASS", AKPASS)
+        monkeypatch.setenv("METARELAY_LABARCHIVES_API_URL", url)
+        assert run_smoke(url, "--check-edits") == 0
+    assert "edited in LabArchives is not overwritten" in capsys.readouterr().out
 
 
 def test_smoke_needs_an_existing_notebook(base_url: str, capsys) -> None:
@@ -83,6 +127,22 @@ def test_manual_login_reads_the_pasted_redirect(base_url: str, monkeypatch) -> N
     monkeypatch.setattr("builtins.input", lambda prompt="": pasted)
     uri = "labarchives://" + base_url.removeprefix("http://")
     assert main(["--uri", uri, "--notebook", "Lab Notebook"]) == 0
+
+
+def test_probe_network_failure_is_a_short_error_without_the_signature(
+    base_url: str, monkeypatch, capsys
+) -> None:
+    import labapi
+    import requests
+
+    def fail(self, *args, **kwargs):
+        raise requests.ConnectionError("GET http://x/api/tree_tools/get_tree_level?sig=SECRET")
+
+    monkeypatch.setattr(labapi.User, "api_get", fail)
+    assert run_smoke(base_url) == 1
+    err = capsys.readouterr().err
+    assert "probe failed (ConnectionError)" in err
+    assert "SECRET" not in err
 
 
 # Recording cassettes
@@ -127,6 +187,19 @@ def test_differences_are_reported_both_ways() -> None:
     assert any("node/is-page" in line and "LabArchives does not" in line for line in differences)
 
 
+def test_error_codes_are_read_from_error_responses(tmp_path: Path) -> None:
+    codes = error_codes(load_cassette(fake_cassette(tmp_path)))
+    assert codes == {"tree_tools/get_tree_level": {"4404"}}
+
+
+def test_different_error_codes_are_reported() -> None:
+    live = {"tree_tools/get_tree_level": {"4002"}, "a/b": {"1"}}
+    fake = {"tree_tools/get_tree_level": {"4404"}, "a/b": {"1"}}
+    assert compare_error_codes(live=live, fake=fake) == [
+        "tree_tools/get_tree_level: LabArchives answered error 4002; the fake answered 4404."
+    ]
+
+
 def test_calls_only_in_one_cassette_are_reported() -> None:
     differences = compare_shapes(live={"a/b": {"x"}}, fake={})
     assert differences == ["a/b: LabArchives was called but the fake was not."]
@@ -144,6 +217,15 @@ def test_fake_matches_captured_cassettes(cassette: Path, tmp_path: Path) -> None
         if line.endswith("LabArchives does not.")
     ]
     assert problems == []
+
+
+@pytest.mark.skipif(not CASSETTES, reason="No cassettes captured from real LabArchives yet.")
+@pytest.mark.parametrize("cassette", CASSETTES, ids=lambda path: path.stem)
+def test_fake_error_codes_match_captured_cassettes(cassette: Path, tmp_path: Path) -> None:
+    """The fake's error codes are placeholders until a real cassette shows LabArchives' own."""
+    live = error_codes(load_cassette(cassette))
+    fake = error_codes(load_cassette(fake_cassette(tmp_path)))
+    assert compare_error_codes(live=live, fake=fake) == []
 
 
 # The dev stack's seed

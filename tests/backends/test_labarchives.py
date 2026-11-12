@@ -5,9 +5,11 @@ exercise the same code path as production. DSST's live run (R1) is the check
 that the fake is right.
 """
 
+import hashlib
 import json
 import urllib.error
 import urllib.request
+from http import HTTPStatus
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
@@ -18,7 +20,10 @@ from metarelay import (
     BackendUnavailableError,
     ConfigurationError,
     ConflictError,
+    Container,
     LogicalPath,
+    NotFoundError,
+    PermissionDeniedError,
     ValidationError,
     WriteMode,
     auth_flow,
@@ -28,12 +33,13 @@ from metarelay import (
 )
 from metarelay.core.auth import AuthFlow
 from metarelay.testing import BackendConformance
-from metarelay.testing.labarchives_fake import FakeLabArchives, serve_fake
+from metarelay.testing.labarchives_fake import NOT_OWNER, FakeLabArchives, serve_fake
 
 pytest.importorskip("labapi")
 
 from metarelay.backends.labarchives import (
     FILES_PAGE,
+    RECORDS_PAGE,
     LabArchivesConfig,
     LabArchivesSession,
 )
@@ -85,6 +91,9 @@ def base_url(fake: FakeLabArchives):
 
 
 class TestLabArchivesBackend(BackendConformance):
+    base = LogicalPath((NOTEBOOK,))  # MetaRelay doesn't create notebooks
+    records_only_is_a_leaf = True
+
     @pytest.fixture
     def session(self, fake: FakeLabArchives, base_url: str):
         self.fake = fake
@@ -201,6 +210,27 @@ def test_unreachable_server_is_unavailable_and_leaks_no_signature(fake: FakeLabA
     assert AKPASS not in str(caught.value)
 
 
+def test_not_the_owner_is_permission_denied(
+    session: LabArchivesSession, fake: FakeLabArchives
+) -> None:
+    fake.fail_next("insert_node", NOT_OWNER, "Not the notebook owner")
+    with pytest.raises(PermissionDeniedError, match="4547") as caught:
+        session.ensure_container(STUDY / "Cohort A")
+    assert caught.value.__cause__ is None  # labapi errors can carry the signed URL
+    assert "sig=" not in str(caught.value)
+
+
+def test_unrecognized_error_code_is_unavailable(
+    session: LabArchivesSession, fake: FakeLabArchives
+) -> None:
+    fake.fail_next("insert_node", 4999, "Something went wrong", HTTPStatus.INTERNAL_SERVER_ERROR)
+    with pytest.raises(BackendUnavailableError, match="4999") as caught:
+        session.ensure_container(STUDY / "Cohort A")
+    assert caught.value.__cause__ is None
+    # The failure was one call only.
+    assert session.ensure_container(STUDY / "Cohort A").path == STUDY / "Cohort A"
+
+
 # How a LogicalPath maps onto the notebook
 
 
@@ -212,16 +242,114 @@ def test_root_lists_notebooks(fake: FakeLabArchives, base_url: str) -> None:
     assert all(container.native_id for container in session.list_containers(ROOT))
 
 
-def test_folders_are_containers_and_pages_are_not(
+def test_pages_are_containers_but_the_records_and_files_pages_are_not(
     session: LabArchivesSession, fake: FakeLabArchives, make_record
 ) -> None:
     receipt = session.write_record(STUDY, make_record())
     session.write_file(STUDY, "trace.csv", b"data")
     nbid = receipt.backend_ids["notebook_id"]
     study_id = session.list_containers(LogicalPath((NOTEBOOK,)))[0].native_id
-    fake.add_node(nbid, study_id, "Someone's page", is_page=True)
+    page_id = fake.add_node(nbid, study_id, "Someone's page", is_page=True)
 
-    assert session.list_containers(STUDY) == []
+    assert session.list_containers(STUDY) == [
+        Container(path=STUDY / "Someone's page", native_id=page_id, holds_records=True)
+    ]
+    assert session.list_containers(STUDY / "Someone's page") == []
+
+
+def test_holds_records_makes_a_page_that_holds_records_and_files(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    path = STUDY / "M1"
+    container = session.ensure_container(path, holds_records=True)
+    [node] = [node for node in fake._nodes.values() if node.name == "M1"]
+    assert node.is_page and node.tree_id == container.native_id
+
+    receipt = session.write_record(path, make_record())
+    session.write_file(path, "trace.csv", b"data")
+    assert receipt.backend_ids["page_id"] == container.native_id
+    assert receipt.container == container
+    captions = [entry["data"] for entry in fake.entries_on(container.native_id)]
+    preview_id = receipt.backend_ids["preview_entry_id"]
+    assert captions[1:] == [
+        f"MetaRelay record | fiber-1 | preview {preview_id} | checksum {receipt.preview_checksum}",
+        "MetaRelay file | trace.csv",
+    ]
+    assert not any(node.name in {RECORDS_PAGE, FILES_PAGE} for node in fake._nodes.values())
+
+
+def test_a_page_made_in_labarchives_holds_records(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    # Chronoxiv's layout: records on pages someone (or an older tool) already made.
+    study = session.list_containers(LogicalPath((NOTEBOOK,)))[0]
+    page_id = fake.add_node(
+        session.list_containers(ROOT)[0].native_id, study.native_id, "Equipment", is_page=True
+    )
+    record = make_record()
+    receipt = session.write_record(STUDY / "Equipment", record)
+    assert receipt.backend_ids["page_id"] == page_id
+    assert session.read_record(STUDY / "Equipment", "fiber-1").record == record
+    assert session.ensure_container(STUDY / "Equipment").native_id == page_id
+
+
+def test_a_folder_and_a_page_with_the_same_name(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    # Chronoxiv can have a cohort folder named Equipment next to the Equipment page.
+    folder = session.ensure_container(STUDY / "Equipment")
+    study = session.list_containers(LogicalPath((NOTEBOOK,)))[0]
+    notebook_id = session.list_containers(ROOT)[0].native_id
+    page_id = fake.add_node(notebook_id, study.native_id, "Equipment", is_page=True)
+
+    # Records use the page...
+    receipt = session.write_record(STUDY / "Equipment", make_record())
+    assert receipt.backend_ids["page_id"] == page_id
+    assert session.read_record(STUDY / "Equipment", "fiber-1").receipt.container.holds_records
+    assert [r.record.record_id for r in session.list_records(STUDY / "Equipment")] == ["fiber-1"]
+    assert session.write_file(STUDY / "Equipment", "a.csv", b"x").container.native_id == page_id
+    assert session.ensure_container(STUDY / "Equipment", holds_records=True).native_id == page_id
+    # ...and container operations use the folder.
+    assert session.ensure_container(STUDY / "Equipment") == folder
+    cohort = session.ensure_container(STUDY / "Equipment" / "Cohort A")
+    assert session.list_containers(STUDY / "Equipment") == [cohort]
+    assert not any(node.name == RECORDS_PAGE for node in fake._nodes.values())
+
+
+def test_two_pages_with_the_same_name_are_ambiguous(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    study = session.list_containers(LogicalPath((NOTEBOOK,)))[0]
+    notebook_id = session.list_containers(ROOT)[0].native_id
+    for _ in range(2):
+        fake.add_node(notebook_id, study.native_id, "M1", is_page=True)
+    with pytest.raises(ConflictError, match="more than one page"):
+        session.write_record(STUDY / "M1", make_record())
+
+
+@pytest.mark.parametrize("name", [RECORDS_PAGE, FILES_PAGE])
+def test_reserved_page_names_are_refused(
+    session: LabArchivesSession, fake: FakeLabArchives, name: str
+) -> None:
+    before = len(fake._nodes)
+    with pytest.raises(ValidationError, match="Choose another name"):
+        session.ensure_container(STUDY / "New folder" / name, holds_records=True)
+    assert len(fake._nodes) == before
+
+
+def test_nothing_is_found_inside_a_page(session: LabArchivesSession) -> None:
+    session.ensure_container(STUDY / "M1", holds_records=True)
+    with pytest.raises(NotFoundError, match="is a page"):
+        session.list_records(STUDY / "M1" / "Session 1")
+    with pytest.raises(NotFoundError, match="is a page"):
+        session.list_containers(STUDY / "M1" / "Session 1")
+
+
+def test_receipts_from_reads_name_the_container(session: LabArchivesSession, make_record) -> None:
+    folder = session.list_containers(LogicalPath((NOTEBOOK,)))[0]
+    session.write_record(STUDY, make_record())
+    assert session.read_record(STUDY, "fiber-1").receipt.container == folder
+    assert session.list_records(STUDY)[0].receipt.container == folder
 
 
 def test_records_live_on_a_page_in_the_folder(
@@ -230,9 +358,13 @@ def test_records_live_on_a_page_in_the_folder(
     record = make_record()
     receipt = session.write_record(STUDY, record)
 
-    [attachment, preview] = records_page(fake, receipt)
+    [preview, attachment] = records_page(fake, receipt)  # the preview is made first
     assert attachment["part_type"] == "Attachment"
-    assert attachment["data"] == "MetaRelay record | fiber-1"
+    assert attachment["data"] == (
+        f"MetaRelay record | fiber-1 | preview {preview['eid']} "
+        f"| checksum {receipt.preview_checksum}"
+    )
+    assert receipt.preview_checksum == hashlib.sha256(preview["data"].encode()).hexdigest()
     assert attachment["filename"] == "fiber-1.json"
     assert json.loads(attachment["content"])["record_id"] == "fiber-1"
     assert preview["part_type"] == "text entry"
@@ -255,9 +387,14 @@ def test_ensuring_a_container_creates_no_pages(
     assert not any(node.is_page for node in fake._nodes.values())
 
 
-def test_ensure_container_creates_a_missing_notebook(session: LabArchivesSession) -> None:
-    session.ensure_container(LogicalPath(("New notebook", "Study")))
-    assert "New notebook" in {c.name for c in session.list_containers(ROOT)}
+def test_a_missing_notebook_is_not_created(
+    session: LabArchivesSession, fake: FakeLabArchives
+) -> None:
+    for path in (LogicalPath(("Lab Notbook",)), LogicalPath(("Lab Notbook", "Study"))):
+        with pytest.raises(NotFoundError, match="doesn't create notebooks"):
+            session.ensure_container(path)
+    assert {c.name for c in session.list_containers(ROOT)} == {NOTEBOOK}
+    assert ("notebooks", "create_notebook") not in fake.calls
 
 
 def test_names_that_look_like_path_escapes(session: LabArchivesSession, make_record) -> None:
@@ -354,8 +491,100 @@ def test_missing_preview_is_restored(
     receipt = session.write_record(STUDY, make_record())
     fake.delete_entry(receipt.backend_ids["preview_entry_id"])
     again = session.write_record(STUDY, make_record(), prior_receipt=receipt)
-    assert again.backend_ids["preview_entry_id"] != receipt.backend_ids["preview_entry_id"]
+    new_preview = again.backend_ids["preview_entry_id"]
+    assert new_preview != receipt.backend_ids["preview_entry_id"]
     assert len(records_page(fake, again)) == 2
+    # The caption now names the new preview, and the record itself is unchanged.
+    attachment = next(e for e in records_page(fake, again) if e["part_type"] == "Attachment")
+    assert attachment["data"].endswith(
+        f"| preview {new_preview} | checksum {again.preview_checksum}"
+    )
+    assert again.conflict_token == receipt.conflict_token
+
+
+# Finding the preview again (the caption names it)
+
+
+def test_preview_edit_without_its_marker_conflicts_even_after_a_read(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    receipt = session.write_record(STUDY, make_record(diameter_um=400))
+    preview_id = receipt.backend_ids["preview_entry_id"]
+    fake.edit_entry(preview_id, "<p>Diameter is really 420 um</p>")  # marker gone
+
+    from_read = session.read_record(STUDY, "fiber-1").receipt
+    assert from_read.backend_ids["preview_entry_id"] == preview_id
+    assert from_read.preview_checksum == receipt.preview_checksum  # as last written
+    with pytest.raises(ConflictError):
+        session.write_record(STUDY, make_record(diameter_um=200), prior_receipt=from_read)
+    # Forcing replaces the edited entry instead of adding a second preview.
+    forced = session.write_record(STUDY, make_record(diameter_um=200), mode=WriteMode.FORCE)
+    assert forced.backend_ids["preview_entry_id"] == preview_id
+    assert len(records_page(fake, receipt)) == 2
+
+
+def test_edit_that_removes_the_marker_conflicts_without_a_preview_id_in_the_receipt(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    receipt = session.write_record(STUDY, make_record(diameter_um=400))
+    preview_id = receipt.backend_ids["preview_entry_id"]
+    fake.edit_entry(preview_id, "<p>Diameter is really 420 um</p>")  # marker gone
+    # Only the caption can find the edited entry now.
+    ids = {k: v for k, v in receipt.backend_ids.items() if k != "preview_entry_id"}
+    older = receipt.model_copy(update={"backend_ids": ids})
+    with pytest.raises(ConflictError):
+        session.write_record(STUDY, make_record(diameter_um=200), prior_receipt=older)
+    assert len(records_page(fake, receipt)) == 2
+
+
+def test_previews_are_found_when_labarchives_strips_comments(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    fake.strip_html_comments = True
+    receipt = session.write_record(STUDY, make_record(diameter_um=400))
+    assert "<!--" not in records_page(fake, receipt)[0]["data"]
+    updated = session.write_record(STUDY, make_record(diameter_um=200), prior_receipt=receipt)
+    session.write_record(STUDY, make_record(diameter_um=200))  # unchanged: nothing to do
+
+    assert updated.backend_ids["preview_entry_id"] == receipt.backend_ids["preview_entry_id"]
+    assert len(records_page(fake, receipt)) == 2
+    stored = session.read_record(STUDY, "fiber-1")
+    assert stored.receipt.preview_checksum == updated.preview_checksum
+    assert [item.record.record_id for item in session.list_records(STUDY)] == ["fiber-1"]
+
+
+def test_captions_from_before_they_named_the_preview_still_work(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    receipt = session.write_record(STUDY, make_record(diameter_um=400))
+    attachment_id = receipt.backend_ids["attachment_entry_id"]
+    fake.edit_entry(attachment_id, "MetaRelay record | fiber-1")  # the old caption
+
+    stored = session.read_record(STUDY, "fiber-1")  # found by its marker
+    assert stored.receipt.backend_ids["preview_entry_id"] == receipt.backend_ids["preview_entry_id"]
+    assert [item.record.record_id for item in session.list_records(STUDY)] == ["fiber-1"]
+    # With no checksum in the caption, the read uses the preview as it is now.
+    assert stored.receipt.preview_checksum == receipt.preview_checksum
+    updated = session.write_record(
+        STUDY, make_record(diameter_um=200), prior_receipt=stored.receipt
+    )
+    attachment = next(e for e in records_page(fake, receipt) if e["eid"] == attachment_id)
+    assert attachment["data"] == (
+        f"MetaRelay record | fiber-1 | preview {receipt.backend_ids['preview_entry_id']} "
+        f"| checksum {updated.preview_checksum}"
+    )
+
+
+def test_caption_naming_a_missing_entry_falls_back_to_the_marker(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    receipt = session.write_record(STUDY, make_record())
+    caption = "MetaRelay record | fiber-1 | preview E0 | checksum not-this-preview"
+    fake.edit_entry(receipt.backend_ids["attachment_entry_id"], caption)
+    stored = session.read_record(STUDY, "fiber-1")
+    assert stored.receipt.backend_ids["preview_entry_id"] == receipt.backend_ids["preview_entry_id"]
+    # The caption's checksum belongs to E0, so it isn't used for this preview.
+    assert stored.receipt.preview_checksum == receipt.preview_checksum
 
 
 def test_duplicate_record_entries_are_a_conflict(
