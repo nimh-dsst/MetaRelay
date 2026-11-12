@@ -64,7 +64,7 @@ class MemorySession:
     def list_containers(self, parent: LogicalPath = ROOT) -> list[Container]:
         self._require_container(parent)
         children = [path for path in self._containers if path != ROOT and path.parent == parent]
-        return [Container(path=path) for path in sorted(children, key=lambda p: p.parts)]
+        return [self._container(path) for path in sorted(children, key=lambda p: p.parts)]
 
     def ensure_container(self, path: LogicalPath, *, holds_records: bool = False) -> Container:
         # Behaves like the strictest backend (LabArchives pages), so code tested
@@ -79,7 +79,7 @@ class MemorySession:
             self._containers.add(path)
             if holds_records:
                 self._records_only.add(path)
-        return Container(path=path)
+        return self._container(path)
 
     def write_record(
         self,
@@ -128,7 +128,7 @@ class MemorySession:
         return FileReceipt(
             destination=self.destination,
             backend=BACKEND_NAME,
-            container=Container(path=path),
+            container=self._container(path),
             name=name,
             checksum=hashlib.sha256(data).hexdigest(),
             size=len(data),
@@ -157,12 +157,15 @@ class MemorySession:
         if path not in self._containers:
             raise NotFoundError(f"Container {str(path)!r} does not exist. Create it first.")
 
+    def _container(self, path: LogicalPath) -> Container:
+        return Container(path=path, holds_records=path in self._records_only)
+
     def _receipt(self, path: LogicalPath, stored: _Stored) -> Receipt:
         checksum = record_checksum(stored.record)
         return Receipt(
             destination=self.destination,
             backend=BACKEND_NAME,
-            container=Container(path=path),
+            container=self._container(path),
             record_id=stored.record.record_id,
             schema_id=stored.record.schema_id,
             schema_version=stored.record.schema_version,

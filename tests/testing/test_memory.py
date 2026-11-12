@@ -16,6 +16,31 @@ class TestMemorySession(BackendConformance):
         session.edit_preview(path, record_id, text)
 
 
+class _OnlyUnderBase(MemorySession):
+    """Refuses to create anything outside ``Lab Notebook``, like LabArchives."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        super().ensure_container(LogicalPath(("Lab Notebook",)))
+
+    def ensure_container(self, path, *, holds_records=False):
+        if path.parts[:1] != ("Lab Notebook",):
+            raise AssertionError(f"the suite created {path} outside its base")
+        return super().ensure_container(path, holds_records=holds_records)
+
+
+class TestConformanceStaysUnderItsBase(BackendConformance):
+    base = LogicalPath(("Lab Notebook",))
+    records_only_is_a_leaf = True
+
+    @pytest.fixture
+    def session(self) -> MemorySession:
+        return _OnlyUnderBase()
+
+    def edit_preview(self, session, path, record_id, text) -> None:
+        session.edit_preview(path, record_id, text)
+
+
 def test_preview_is_stored_with_the_record(make_record) -> None:
     session = MemorySession()
     receipt = session.write_record(ROOT, make_record())
