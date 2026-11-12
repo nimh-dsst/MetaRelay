@@ -165,6 +165,46 @@ def test_missing_preview_is_restored(session: LocalSession, make_record) -> None
     assert receipt.preview_checksum is not None
 
 
+def test_records_written_before_preview_files_compare_the_current_preview(
+    session: LocalSession, make_record
+) -> None:
+    receipt = session.write_record(STUDY, make_record(diameter_um=400))
+    (folder(session) / ".metarelay" / "previews" / "fiber-1").unlink()  # as older MetaRelay left it
+    (folder(session) / "fiber-1.md").write_text("Edited by hand\n")
+    from_read = session.read_record(STUDY, "fiber-1").receipt
+    assert from_read.preview_checksum != receipt.preview_checksum  # today's preview
+    session.write_record(STUDY, make_record(diameter_um=200), prior_receipt=from_read)
+    # That write records the preview again, so edits after it are caught.
+    assert (folder(session) / ".metarelay" / "previews" / "fiber-1").exists()
+
+
+def test_damaged_preview_file_is_a_clear_error(session: LocalSession, make_record) -> None:
+    session.write_record(STUDY, make_record())
+    (folder(session) / ".metarelay" / "previews" / "fiber-1").write_text("[1, 2]")
+    with pytest.raises(ValidationError, match="fiber-1 is damaged"):
+        session.read_record(STUDY, "fiber-1")
+
+
+def test_two_records_keep_separate_preview_files(session: LocalSession, make_record) -> None:
+    session.write_record(STUDY, make_record("fiber-1"))
+    session.write_record(STUDY, make_record("fiber-2"))
+    names = sorted(p.name for p in (folder(session) / ".metarelay" / "previews").iterdir())
+    assert names == ["fiber-1", "fiber-2"]
+
+
+def test_restored_preview_is_the_one_compared(session: LocalSession, make_record) -> None:
+    session.write_record(STUDY, make_record())
+    # An older record (no preview file) whose preview was deleted.
+    (folder(session) / ".metarelay" / "previews" / "fiber-1").unlink()
+    (folder(session) / "fiber-1.md").unlink()
+    restored = session.write_record(STUDY, make_record())
+    (folder(session) / "fiber-1.md").write_text("Edited by hand\n")
+    from_read = session.read_record(STUDY, "fiber-1").receipt
+    assert from_read.preview_checksum == restored.preview_checksum
+    with pytest.raises(ConflictError):
+        session.write_record(STUDY, make_record(diameter_um=1), prior_receipt=from_read)
+
+
 # Names
 
 

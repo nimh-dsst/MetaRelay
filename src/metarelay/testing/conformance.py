@@ -371,6 +371,30 @@ class BackendConformance:
         session.write_record(container, make_record(label="v2"), mode=WriteMode.FORCE)
         assert session.read_record(container, "rec-1").record.payload["label"] == "v2"
 
+    def test_preview_edit_conflicts_even_after_a_read(
+        self, session: Session, container: LogicalPath, make_record
+    ) -> None:
+        # Reading returns the JSON, not the preview, so the caller hasn't seen
+        # the edit: the read's receipt must not accept it (D7).
+        receipt = session.write_record(container, make_record(label="v1"))
+        if receipt.preview_checksum is None:
+            pytest.skip("This backend does not track previews.")
+        try:
+            self.edit_preview(session, container, "rec-1", "Edited by hand\n")
+        except NotImplementedError:
+            pytest.skip("This backend cannot simulate a preview edit.")
+        from_read = session.read_record(container, "rec-1").receipt
+        [listed] = session.list_records(container)
+        assert from_read.preview_checksum == receipt.preview_checksum
+        assert listed.receipt.preview_checksum == receipt.preview_checksum
+        with pytest.raises(ConflictError):
+            session.write_record(container, make_record(label="v2"), prior_receipt=from_read)
+        # force replaces the edit, and the next read reflects the new preview.
+        forced = session.write_record(container, make_record(label="v2"), mode=WriteMode.FORCE)
+        assert session.read_record(container, "rec-1").receipt.preview_checksum == (
+            forced.preview_checksum
+        )
+
     # Files
 
     def test_write_file(self, session: Session, container: LogicalPath) -> None:

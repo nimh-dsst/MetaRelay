@@ -40,7 +40,9 @@ same for every backend.
 | `force` | Overwrite it. Use only after the user chose to. |
 
 Edits made directly to the preview (in the notebook entry) also count as a
-change at the destination, so they are not overwritten silently.
+change at the destination, so they are not overwritten silently. That holds
+even if you read the record after the edit: a read returns the JSON, not the
+preview, so its receipt still describes the preview MetaRelay last wrote.
 
 ## Errors
 

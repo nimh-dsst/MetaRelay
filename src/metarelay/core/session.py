@@ -94,6 +94,12 @@ class Session(Protocol):
     def read_record(self, path: LogicalPath, record_id: str) -> StoredRecord:
         """Read one record.
 
+        The receipt's ``preview_checksum`` is the one from MetaRelay's last
+        write, not the preview's current one, so a preview edited by hand
+        still conflicts on the next write even if the caller read in between
+        (D7). A backend that has no record of its last write (records written
+        before it kept one) falls back to the current preview.
+
         Raises:
             NotFoundError: If there is no such record or container.
         """

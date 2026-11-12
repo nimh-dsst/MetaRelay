@@ -41,6 +41,8 @@ BACKEND_NAME = "memory"
 class _Stored:
     record: Record
     preview: str
+    written_preview: str
+    """``preview_checksum`` of the preview as MetaRelay last wrote it."""
 
 
 class MemorySession:
@@ -98,7 +100,8 @@ class MemorySession:
             remote_preview_checksum=preview_checksum(remote.preview) if remote else None,
         )
         if action is WriteAction.WRITE:
-            self._records[key] = _Stored(record, render_preview(record).markdown)
+            preview = render_preview(record).markdown
+            self._records[key] = _Stored(record, preview, preview_checksum(preview))
         return self._receipt(path, self._records[key])
 
     def read_record(self, path: LogicalPath, record_id: str) -> StoredRecord:
@@ -165,7 +168,7 @@ class MemorySession:
             schema_version=stored.record.schema_version,
             checksum=checksum,
             conflict_token=checksum,
-            preview_checksum=preview_checksum(stored.preview),
+            preview_checksum=stored.written_preview,
         )
 
 
