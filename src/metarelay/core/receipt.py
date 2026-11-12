@@ -64,9 +64,12 @@ class Receipt(MetaRelayModel):
     conflict_token: str
     """The backend's own version marker. Opaque to the core."""
     preview_checksum: str | None = None
-    """Fingerprint of the rendered preview, to detect edits made directly in
-    the notebook (D7, pending DSST confirmation). ``None`` for receipts made
-    before previews were tracked."""
+    """Fingerprint of the preview as MetaRelay last wrote it, to detect edits
+    made directly in the notebook (D7, pending DSST confirmation). A receipt
+    from a read carries the same value, not a fingerprint of the preview as it
+    is now: reading returns the JSON, so the caller hasn't seen an edit to the
+    preview, and the next write must still report it. ``None`` for receipts
+    made before previews were tracked."""
     backend_ids: dict[str, str] = Field(default_factory=dict)
     """Backend-specific IDs, for example LabArchives' ``page_id`` and
     ``attachment_entry_id``."""

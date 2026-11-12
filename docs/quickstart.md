@@ -121,3 +121,8 @@ conflict and 1 on any other error.
 
 `write` won't create a missing container, so a typo in the path is an error
 instead of a new folder. Run `mkdir` first, or pass `--create-path`.
+
+`mkdir` and `write --create-path` take `--holds-records` for a container that
+will hold records and never other containers. A backend that has a separate
+kind of container for that (a notebook page) creates one; local folders are
+unaffected. If the container already exists, the flag changes nothing.

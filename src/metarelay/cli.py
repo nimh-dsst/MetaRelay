@@ -63,6 +63,7 @@ def _parser() -> argparse.ArgumentParser:
 
     mkdir = commands.add_parser("mkdir", help="create a container (and its parents)")
     _add_location(mkdir, path_required=True)
+    _add_holds_records(mkdir)
 
     write = commands.add_parser("write", help="write a record from a JSON file")
     _add_location(write, path_required=True)
@@ -80,6 +81,7 @@ def _parser() -> argparse.ArgumentParser:
         help="create the container first if it doesn't exist (otherwise a missing "
         "container is an error, so a typo doesn't create a folder)",
     )
+    _add_holds_records(write)
     _add_receipts(write)
 
     read = commands.add_parser("read", help="print a record as JSON")
@@ -100,6 +102,16 @@ def _add_location(parser: argparse.ArgumentParser, *, path_required: bool) -> No
     )
 
 
+def _add_holds_records(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--holds-records",
+        action="store_true",
+        help="if the container is created, make it one that holds records and never "
+        "other containers (a page, on backends that have pages; local folders are "
+        "unaffected)",
+    )
+
+
 def _add_receipts(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--receipts", type=Path, metavar="FILE", help="read and save receipts in this JSON file"
@@ -108,7 +120,10 @@ def _add_receipts(parser: argparse.ArgumentParser) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command line. Returns the exit status."""
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.command == "write" and args.holds_records and not args.create_path:
+        parser.error("--holds-records only applies with --create-path")
     try:
         _check_receipts_file(getattr(args, "receipts", None))
         for module in args.imports:
@@ -142,7 +157,7 @@ def _run(args: argparse.Namespace, session: Session) -> int:
         return 0
 
     if args.command == "mkdir":
-        session.ensure_container(path)
+        session.ensure_container(path, holds_records=args.holds_records)
         return 0
 
     receipts = _load_receipts(args.receipts)
@@ -150,7 +165,7 @@ def _run(args: argparse.Namespace, session: Session) -> int:
     if args.command == "write":
         record = Record.model_validate_json(_read_input(args.file))
         if args.create_path:
-            session.ensure_container(path)
+            session.ensure_container(path, holds_records=args.holds_records)
         before = _state_at_destination(session, path, record.record_id)
         receipt = session.write_record(
             path,

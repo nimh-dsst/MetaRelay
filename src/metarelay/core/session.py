@@ -49,13 +49,26 @@ class Session(Protocol):
         """
         ...
 
-    def ensure_container(self, path: LogicalPath) -> Container:
+    def ensure_container(self, path: LogicalPath, *, holds_records: bool = False) -> Container:
         """Create ``path`` and its parents if needed, and return it.
 
         Idempotent: calling it again returns the same container. Afterwards the
         container exists, even while empty: listing it returns ``[]``, not
         ``NotFoundError``. A backend that can't store an empty container
         (Git can't store an empty folder) writes a placeholder to make it real.
+
+        ``holds_records=True`` says the last part of ``path`` will hold records
+        and never child containers. Backends with a native "page of entries"
+        create one: a LabArchives page or an eLabFTW item. Backends where every
+        container is a folder (local, GitHub) ignore it. The hint only affects
+        creation: parents are always ordinary containers, and if ``path``
+        already exists it is returned as it is, whatever kind it is.
+
+        Raises:
+            ValidationError: If a parent in ``path`` is a records-only
+                container, on a backend where that is a different kind of
+                container (a LabArchives page can't contain anything). Portable
+                code never puts a container inside one.
         """
         ...
 
@@ -80,6 +93,12 @@ class Session(Protocol):
 
     def read_record(self, path: LogicalPath, record_id: str) -> StoredRecord:
         """Read one record.
+
+        The receipt's ``preview_checksum`` is the one from MetaRelay's last
+        write, not the preview's current one, so a preview edited by hand
+        still conflicts on the next write even if the caller read in between
+        (D7). A backend that has no record of its last write (records written
+        before it kept one) falls back to the current preview.
 
         Raises:
             NotFoundError: If there is no such record or container.

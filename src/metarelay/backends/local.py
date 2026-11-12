@@ -75,6 +75,10 @@ BACKEND_NAME = "local"
 META_DIR = ".metarelay"
 INDEX_FILE = "index.json"
 HISTORY_FILE = "history.jsonl"
+PREVIEWS_DIR = "previews"
+"""``.metarelay/previews/<record_id>`` holds the ``preview_checksum`` of that
+record's preview as MetaRelay last wrote it. One file per record, so two
+writers in the same folder can't lose each other's."""
 INDEX_VERSION = 1
 
 _UNSAFE_CHARS = frozenset('\\:*?"<>|')
@@ -236,7 +240,8 @@ class LocalSession:
             )
         return [Container(path=parent / name) for name in names]
 
-    def ensure_container(self, path: LogicalPath) -> Container:
+    def ensure_container(self, path: LogicalPath, *, holds_records: bool = False) -> Container:
+        # Every container is a folder here, so holds_records changes nothing.
         path = _nfc_path(path)
         self._walk(path, create=True)
         return Container(path=path)
@@ -293,6 +298,7 @@ class LocalSession:
                     ) from error
                 _write_atomic(md_file, preview.encode())
                 self._update_index(folder, records={record_id})
+                self._remember_preview(folder, record_id, preview)
                 self._append_history(
                     folder,
                     kind="record",
@@ -307,6 +313,7 @@ class LocalSession:
                 # and index entry. An edited preview is not touched.
                 if remote_preview is None:
                     _write_atomic(md_file, preview.encode())
+                    self._remember_preview(folder, record_id, preview)
                 self._update_index(folder, records={record_id})
 
         return self._read(path, folder, record_id).receipt
@@ -468,6 +475,7 @@ class LocalSession:
                 raise missing
             data = _read_optional(json_file)
             preview = _read_optional(folder / f"{record_id}.md")
+            written_preview = self._written_preview(folder, record_id)
         if data is None:
             raise missing
         try:
@@ -488,11 +496,33 @@ class LocalSession:
             schema_version=record.schema_version,
             checksum=record_checksum(record),
             conflict_token=_sha256(data),
-            preview_checksum=(
+            # The preview as MetaRelay last wrote it, so a hand edit still
+            # conflicts after a read. Records written before MetaRelay kept
+            # these fall back to the preview as it is now.
+            preview_checksum=written_preview
+            or (
                 preview_checksum(preview.decode(errors="replace")) if preview is not None else None
             ),
         )
         return StoredRecord(record=record, receipt=receipt)
+
+    def _written_preview(self, folder: Path, record_id: str) -> str | None:
+        where = folder / META_DIR / PREVIEWS_DIR / record_id
+        data = _read_optional(where)
+        if data is None:
+            return None
+        checksum = data.decode(errors="replace").strip()
+        if len(checksum) != 64 or any(char not in "0123456789abcdef" for char in checksum):
+            raise ValidationError(
+                f"{where} is damaged. Delete it; MetaRelay then compares edits "
+                "against the preview as it is now."
+            )
+        return checksum
+
+    def _remember_preview(self, folder: Path, record_id: str, preview: str) -> None:
+        previews = folder / META_DIR / PREVIEWS_DIR
+        previews.mkdir(parents=True, exist_ok=True)
+        _write_atomic(previews / record_id, (preview_checksum(preview) + "\n").encode())
 
     def _load_index(self, folder: Path) -> dict[str, list[str]]:
         data = _read_optional(folder / META_DIR / INDEX_FILE)

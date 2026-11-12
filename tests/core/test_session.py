@@ -39,7 +39,7 @@ class DictSession:
     def list_containers(self, parent: LogicalPath = ROOT) -> list[Container]:
         return [Container(path=p) for p in sorted(self.containers, key=str) if p.parent == parent]
 
-    def ensure_container(self, path: LogicalPath) -> Container:
+    def ensure_container(self, path: LogicalPath, *, holds_records: bool = False) -> Container:
         self.containers.add(path)
         return Container(path=path)
 

@@ -217,3 +217,34 @@ def test_unsavable_receipts_fail_before_writing(dest: str, record_file, tmp_path
     bad = str(tmp_path / "nodir" / "r.json")
     assert main(["write", dest, "Study", record_file(), "--receipts", bad]) == 1
     assert not (Path(dest.removeprefix("file://")) / "Study" / "fiber-1.json").exists()
+
+
+def test_holds_records_flag_reaches_the_session(record_file, monkeypatch, capsys) -> None:
+    # MemorySession refuses a container inside a records-only one, like a
+    # LabArchives page does, so the refusal shows the flag was passed on.
+    from metarelay.testing import MemorySession
+
+    session = MemorySession()
+    monkeypatch.setattr("metarelay.cli.connect", lambda uri: session)
+    dest = "memory://test"
+
+    assert main(["mkdir", dest, "Study/M1", "--holds-records"]) == 0
+    assert main(["mkdir", dest, "Study/M1/Session 1"]) == 1
+    assert "holds records only" in capsys.readouterr().err
+
+    assert main(["write", dest, "Study/M2", record_file(), "--create-path", "--holds-records"]) == 0
+    assert main(["mkdir", dest, "Study/M2/Session 1"]) == 1
+
+    assert main(["mkdir", dest, "Study/M3"]) == 0
+    assert main(["mkdir", dest, "Study/M3/Session 1"]) == 0
+
+
+def test_holds_records_without_create_path_is_refused(dest: str, record_file, capsys) -> None:
+    # Without --create-path, write never creates a container, so the flag would do nothing.
+    main(["mkdir", dest, "Study"])
+    with pytest.raises(SystemExit) as exit_info:
+        main(["write", dest, "Study", record_file(), "--holds-records"])
+    assert exit_info.value.code == 2
+    assert "--holds-records only applies with --create-path" in capsys.readouterr().err
+    assert main(["ls", dest, "Study"]) == 0
+    assert capsys.readouterr().out == ""

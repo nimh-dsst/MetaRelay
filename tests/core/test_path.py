@@ -49,9 +49,15 @@ def test_paths_are_hashable_and_comparable() -> None:
 
 def test_path_serializes_as_a_plain_list() -> None:
     container = Container(path=LogicalPath(("a", "b")), native_id="123")
-    assert container.model_dump(mode="json") == {"path": ["a", "b"], "native_id": "123"}
+    assert container.model_dump(mode="json") == {
+        "path": ["a", "b"],
+        "native_id": "123",
+        "holds_records": False,
+    }
     assert Container.model_validate(container.model_dump(mode="json")) == container
     assert container.name == "b"
+    # Receipts saved before holds_records existed still load.
+    assert Container.model_validate({"path": ["a", "b"], "native_id": "123"}) == container
 
 
 @pytest.mark.parametrize("name", ["back\\slash", "C:", "naïve", "with space"])

@@ -11,7 +11,7 @@ same for every backend.
 | **Schema** | A Pydantic model registered under an ID and version, for example `fiber_photometry.implant` v1. It must set `extra="forbid"` or `"allow"`, so unknown keys are never dropped silently. |
 | **Destination** | A URI that picks the backend: `file:///…`, `labarchives://…`, `elabftw://…`, `github://…`. |
 | **Session** | An open connection to one destination. `connect(uri)` returns one. |
-| **Container** | Where records live, named by a **LogicalPath** such as `("Fiber study", "Cohort A")`. Each backend maps it to what it has: folders, notebook pages, tags. Only `ensure_container` creates one; listing, reading or writing a missing container raises `NotFoundError`, so a typo isn't mistaken for an empty container. |
+| **Container** | Where records live, named by a **LogicalPath** such as `("Fiber study", "Cohort A")`. Each backend maps it to what it has: folders, notebook pages, tags. Only `ensure_container` creates one; listing, reading or writing a missing container raises `NotFoundError`, so a typo isn't mistaken for an empty container. `ensure_container(path, holds_records=True)` asks for a container that holds only records (a notebook page where the backend has one). |
 | **Receipt** | What MetaRelay knows about a record after writing or reading it, including its checksum. Keep receipts (in a `SyncIndex`) to detect conflicts next time. |
 | **Preview** | A readable table of the record, stored next to it, so people never have to read raw JSON. |
 
@@ -40,7 +40,9 @@ same for every backend.
 | `force` | Overwrite it. Use only after the user chose to. |
 
 Edits made directly to the preview (in the notebook entry) also count as a
-change at the destination, so they are not overwritten silently.
+change at the destination, so they are not overwritten silently. That holds
+even if you read the record after the edit: a read returns the JSON, not the
+preview, so its receipt still describes the preview MetaRelay last wrote.
 
 ## Errors
 

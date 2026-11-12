@@ -107,6 +107,11 @@ class Container(MetaRelayModel):
 
     path: LogicalPath = Field(default_factory=LogicalPath)
     native_id: str | None = None
+    holds_records: bool = False
+    """True for a container that holds records and can't contain other
+    containers (a LabArchives page), made by
+    ``ensure_container(path, holds_records=True)`` or by hand. Always
+    ``False`` on backends where every container is a folder."""
 
     @property
     def name(self) -> str:

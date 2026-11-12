@@ -17,6 +17,12 @@ fixture that returns a fresh, empty session::
 If the backend can simulate a person editing the readable preview directly
 (D7), also override ``edit_preview``. Otherwise those checks are skipped.
 
+If the backend can't create top-level containers, set ``base`` to an existing
+container to run the suite inside.
+
+If records-only containers (``holds_records=True``) can't contain other
+containers on the backend, set ``records_only_is_a_leaf = True``.
+
 The suite registers its own small schema, ``metarelay.conformance`` v1, in
 the default registry, so it does not depend on any real schema.
 """
@@ -61,6 +67,19 @@ RecordFactory = Callable[..., Record]
 class BackendConformance:
     """Mix into a ``Test*`` class and provide a ``session`` fixture."""
 
+    base: LogicalPath = ROOT
+    """Where the suite creates its containers. Set it to an existing container
+    when the backend can't create top-level ones (LabArchives notebooks, say)."""
+
+    records_only_is_a_leaf: bool = False
+    """True if ``ensure_container(path, holds_records=True)`` makes a container
+    that can't contain other containers (a LabArchives page). The suite then
+    checks that putting one inside raises ``ValidationError``; otherwise it
+    checks that it works like any other container."""
+
+    def _at(self, *names: str) -> LogicalPath:
+        return LogicalPath((*self.base.parts, *names))
+
     @pytest.fixture
     def session(self) -> Session:
         raise NotImplementedError("Override the session fixture to return a fresh session.")
@@ -94,7 +113,7 @@ class BackendConformance:
     @pytest.fixture
     def container(self, session: Session) -> LogicalPath:
         """A fresh container, unique per test so live backends don't collide."""
-        path = LogicalPath(("MetaRelay conformance", uuid.uuid4().hex[:12]))
+        path = self._at("MetaRelay conformance", uuid.uuid4().hex[:12])
         session.ensure_container(path)
         return path
 
@@ -113,35 +132,33 @@ class BackendConformance:
     # Containers
 
     def test_ensure_container_is_idempotent(self, session: Session) -> None:
-        path = LogicalPath(("Study",))
+        path = self._at("Study")
         first = session.ensure_container(path)
         second = session.ensure_container(path)
         assert first.path == path
         assert second == first
 
     def test_ensure_container_creates_parents(self, session: Session) -> None:
-        session.ensure_container(LogicalPath(("Study", "Cohort A", "M1")))
-        assert _paths(session.list_containers(ROOT)) >= {LogicalPath(("Study",))}
-        assert _paths(session.list_containers(LogicalPath(("Study",)))) == {
-            LogicalPath(("Study", "Cohort A"))
-        }
+        session.ensure_container(self._at("Study", "Cohort A", "M1"))
+        assert _paths(session.list_containers(self.base)) >= {self._at("Study")}
+        assert _paths(session.list_containers(self._at("Study"))) == {self._at("Study", "Cohort A")}
 
     def test_list_containers_is_not_recursive(self, session: Session) -> None:
-        session.ensure_container(LogicalPath(("Study", "Cohort A")))
-        session.ensure_container(LogicalPath(("Study", "Cohort B")))
-        listed = _paths(session.list_containers(LogicalPath(("Study",))))
-        assert listed == {LogicalPath(("Study", "Cohort A")), LogicalPath(("Study", "Cohort B"))}
+        session.ensure_container(self._at("Study", "Cohort A"))
+        session.ensure_container(self._at("Study", "Cohort B"))
+        listed = _paths(session.list_containers(self._at("Study")))
+        assert listed == {self._at("Study", "Cohort A"), self._at("Study", "Cohort B")}
 
     def test_ensured_empty_container_lists_as_empty(self, session: Session) -> None:
-        path = LogicalPath(("Empty",))
+        path = self._at("Empty")
         session.ensure_container(path)
         assert session.list_records(path) == []
         assert session.list_containers(path) == []
-        assert path in _paths(session.list_containers(ROOT))
+        assert path in _paths(session.list_containers(self.base))
 
     def test_missing_container_is_not_found(self, session: Session, make_record) -> None:
         # Only ensure_container creates containers, so a typo is reported.
-        missing = LogicalPath(("Missing",))
+        missing = self._at("Missing")
         with pytest.raises(NotFoundError):
             session.list_containers(missing)
         with pytest.raises(NotFoundError):
@@ -152,10 +169,71 @@ class BackendConformance:
             session.write_record(missing, make_record())
         with pytest.raises(NotFoundError):
             session.write_file(missing, "trace.csv", b"data")
-        assert missing not in _paths(session.list_containers(ROOT))
+        assert missing not in _paths(session.list_containers(self.base))
+
+    # Records-only containers (ensure_container's holds_records hint)
+
+    def test_records_only_container_is_idempotent(self, session: Session) -> None:
+        path = self._at("Study", "M1")
+        first = session.ensure_container(path, holds_records=True)
+        second = session.ensure_container(path, holds_records=True)
+        assert first.path == path
+        assert second == first
+        # Listings say which containers are records-only, where the backend has them.
+        assert first.holds_records is self.records_only_is_a_leaf
+        [listed] = session.list_containers(path.parent)
+        assert listed.holds_records is self.records_only_is_a_leaf
+        assert _paths(session.list_containers(self._at("Study"))) == {path}
+        assert session.list_records(path) == []
+
+    def test_records_only_container_holds_records(self, session: Session, make_record) -> None:
+        path = self._at("Study", "M1")
+        session.ensure_container(path, holds_records=True)
+        first = make_record("rec-1")
+        session.write_record(path, first)
+        session.write_record(path, make_record("rec-2"))
+        assert session.read_record(path, "rec-1").record == first
+        assert {item.record.record_id for item in session.list_records(path)} == {"rec-1", "rec-2"}
+
+    def test_records_only_hint_leaves_parents_ordinary(self, session: Session) -> None:
+        session.ensure_container(self._at("Study", "Cohort A", "M1"), holds_records=True)
+        sibling = self._at("Study", "Cohort A", "M2")
+        session.ensure_container(sibling)
+        assert sibling in _paths(session.list_containers(self._at("Study", "Cohort A")))
+
+    def test_records_only_hint_does_not_change_an_existing_container(
+        self, session: Session
+    ) -> None:
+        folder = self._at("Study")
+        created = session.ensure_container(folder)
+        assert created.holds_records is False
+        assert session.ensure_container(folder, holds_records=True) == created
+        session.ensure_container(folder / "Cohort A")  # still an ordinary container
+
+        page = self._at("Other", "M1")
+        created = session.ensure_container(page, holds_records=True)
+        assert session.ensure_container(page) == created
+
+    def test_container_inside_records_only_container(self, session: Session, make_record) -> None:
+        path = self._at("Study", "M1")
+        session.ensure_container(path, holds_records=True)
+        record = make_record()
+        session.write_record(path, record)
+        child = path / "Session 1"
+        if not self.records_only_is_a_leaf:
+            session.ensure_container(child)
+            assert _paths(session.list_containers(path)) == {child}
+            return
+        with pytest.raises(ValidationError):
+            session.ensure_container(child)
+        with pytest.raises(ValidationError):
+            session.ensure_container(child / "deeper", holds_records=True)
+        # Nothing half-created, and the records are untouched.
+        assert session.list_containers(path) == []
+        assert [item.record for item in session.list_records(path)] == [record]
 
     def test_names_with_spaces_and_unicode(self, session: Session, make_record) -> None:
-        path = LogicalPath(("Fiber study", "Cohort ä"))
+        path = self._at("Fiber study", "Cohort ä")
         session.ensure_container(path)
         record = make_record()
         session.write_record(path, record)
@@ -207,7 +285,7 @@ class BackendConformance:
         assert session.list_records(container) == []
 
     def test_same_id_in_two_containers(self, session: Session, make_record) -> None:
-        first, second = LogicalPath(("A",)), LogicalPath(("B",))
+        first, second = self._at("A"), self._at("B")
         session.ensure_container(first)
         session.ensure_container(second)
         session.write_record(first, make_record(label="in A"))
@@ -305,6 +383,30 @@ class BackendConformance:
             session.write_record(container, make_record(label="v2"), prior_receipt=receipt)
         session.write_record(container, make_record(label="v2"), mode=WriteMode.FORCE)
         assert session.read_record(container, "rec-1").record.payload["label"] == "v2"
+
+    def test_preview_edit_conflicts_even_after_a_read(
+        self, session: Session, container: LogicalPath, make_record
+    ) -> None:
+        # Reading returns the JSON, not the preview, so the caller hasn't seen
+        # the edit: the read's receipt must not accept it (D7).
+        receipt = session.write_record(container, make_record(label="v1"))
+        if receipt.preview_checksum is None:
+            pytest.skip("This backend does not track previews.")
+        try:
+            self.edit_preview(session, container, "rec-1", "Edited by hand\n")
+        except NotImplementedError:
+            pytest.skip("This backend cannot simulate a preview edit.")
+        from_read = session.read_record(container, "rec-1").receipt
+        [listed] = session.list_records(container)
+        assert from_read.preview_checksum == receipt.preview_checksum
+        assert listed.receipt.preview_checksum == receipt.preview_checksum
+        with pytest.raises(ConflictError):
+            session.write_record(container, make_record(label="v2"), prior_receipt=from_read)
+        # force replaces the edit, and the next read reflects the new preview.
+        forced = session.write_record(container, make_record(label="v2"), mode=WriteMode.FORCE)
+        assert session.read_record(container, "rec-1").receipt.preview_checksum == (
+            forced.preview_checksum
+        )
 
     # Files
 

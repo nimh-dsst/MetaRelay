@@ -25,7 +25,7 @@ from metarelay.core.checksum import preview_checksum, record_checksum
 from metarelay.core.config import DestinationConfig
 from metarelay.core.conflict import WriteAction, WriteMode, decide_write
 from metarelay.core.destination import Destination
-from metarelay.core.errors import ConfigurationError, NotFoundError
+from metarelay.core.errors import ConfigurationError, NotFoundError, ValidationError
 from metarelay.core.path import ROOT, Container, LogicalPath
 from metarelay.core.preview import render_preview
 from metarelay.core.receipt import FileReceipt, Receipt
@@ -41,6 +41,8 @@ BACKEND_NAME = "memory"
 class _Stored:
     record: Record
     preview: str
+    written_preview: str
+    """``preview_checksum`` of the preview as MetaRelay last wrote it."""
 
 
 class MemorySession:
@@ -49,6 +51,7 @@ class MemorySession:
     def __init__(self, destination: str = "memory://test") -> None:
         self._destination = Destination.parse(destination).uri
         self._containers: set[LogicalPath] = {ROOT}
+        self._records_only: set[LogicalPath] = set()
         self._records: dict[tuple[LogicalPath, str], _Stored] = {}
         self.files: dict[tuple[LogicalPath, str], bytes] = {}
         """Files written with ``write_file``, for tests to inspect."""
@@ -61,12 +64,22 @@ class MemorySession:
     def list_containers(self, parent: LogicalPath = ROOT) -> list[Container]:
         self._require_container(parent)
         children = [path for path in self._containers if path != ROOT and path.parent == parent]
-        return [Container(path=path) for path in sorted(children, key=lambda p: p.parts)]
+        return [self._container(path) for path in sorted(children, key=lambda p: p.parts)]
 
-    def ensure_container(self, path: LogicalPath) -> Container:
-        for depth in range(1, len(path.parts) + 1):
-            self._containers.add(LogicalPath(path.parts[:depth]))
-        return Container(path=path)
+    def ensure_container(self, path: LogicalPath, *, holds_records: bool = False) -> Container:
+        # Behaves like the strictest backend (LabArchives pages), so code tested
+        # here doesn't put a container inside a records-only one by accident.
+        parents = [LogicalPath(path.parts[:depth]) for depth in range(1, len(path.parts))]
+        for parent in parents:
+            if parent in self._records_only:
+                child = path.parts[len(parent.parts)]
+                raise ValidationError(f"{parent} holds records only, cannot contain {child!r}.")
+        if path not in self._containers:
+            self._containers.update(parents)
+            self._containers.add(path)
+            if holds_records:
+                self._records_only.add(path)
+        return self._container(path)
 
     def write_record(
         self,
@@ -87,7 +100,8 @@ class MemorySession:
             remote_preview_checksum=preview_checksum(remote.preview) if remote else None,
         )
         if action is WriteAction.WRITE:
-            self._records[key] = _Stored(record, render_preview(record).markdown)
+            preview = render_preview(record).markdown
+            self._records[key] = _Stored(record, preview, preview_checksum(preview))
         return self._receipt(path, self._records[key])
 
     def read_record(self, path: LogicalPath, record_id: str) -> StoredRecord:
@@ -114,7 +128,7 @@ class MemorySession:
         return FileReceipt(
             destination=self.destination,
             backend=BACKEND_NAME,
-            container=Container(path=path),
+            container=self._container(path),
             name=name,
             checksum=hashlib.sha256(data).hexdigest(),
             size=len(data),
@@ -143,18 +157,21 @@ class MemorySession:
         if path not in self._containers:
             raise NotFoundError(f"Container {str(path)!r} does not exist. Create it first.")
 
+    def _container(self, path: LogicalPath) -> Container:
+        return Container(path=path, holds_records=path in self._records_only)
+
     def _receipt(self, path: LogicalPath, stored: _Stored) -> Receipt:
         checksum = record_checksum(stored.record)
         return Receipt(
             destination=self.destination,
             backend=BACKEND_NAME,
-            container=Container(path=path),
+            container=self._container(path),
             record_id=stored.record.record_id,
             schema_id=stored.record.schema_id,
             schema_version=stored.record.schema_version,
             checksum=checksum,
             conflict_token=checksum,
-            preview_checksum=preview_checksum(stored.preview),
+            preview_checksum=stored.written_preview,
         )
 
 
