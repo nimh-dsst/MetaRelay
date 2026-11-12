@@ -17,6 +17,9 @@ fixture that returns a fresh, empty session::
 If the backend can simulate a person editing the readable preview directly
 (D7), also override ``edit_preview``. Otherwise those checks are skipped.
 
+If records-only containers (``holds_records=True``) can't contain other
+containers on the backend, set ``records_only_is_a_leaf = True``.
+
 The suite registers its own small schema, ``metarelay.conformance`` v1, in
 the default registry, so it does not depend on any real schema.
 """
@@ -60,6 +63,12 @@ RecordFactory = Callable[..., Record]
 
 class BackendConformance:
     """Mix into a ``Test*`` class and provide a ``session`` fixture."""
+
+    records_only_is_a_leaf: bool = False
+    """True if ``ensure_container(path, holds_records=True)`` makes a container
+    that can't contain other containers (a LabArchives page). The suite then
+    checks that putting one inside raises ``ValidationError``; otherwise it
+    checks that it works like any other container."""
 
     @pytest.fixture
     def session(self) -> Session:
@@ -153,6 +162,62 @@ class BackendConformance:
         with pytest.raises(NotFoundError):
             session.write_file(missing, "trace.csv", b"data")
         assert missing not in _paths(session.list_containers(ROOT))
+
+    # Records-only containers (ensure_container's holds_records hint)
+
+    def test_records_only_container_is_idempotent(self, session: Session) -> None:
+        path = LogicalPath(("Study", "M1"))
+        first = session.ensure_container(path, holds_records=True)
+        second = session.ensure_container(path, holds_records=True)
+        assert first.path == path
+        assert second == first
+        assert _paths(session.list_containers(LogicalPath(("Study",)))) == {path}
+        assert session.list_records(path) == []
+
+    def test_records_only_container_holds_records(self, session: Session, make_record) -> None:
+        path = LogicalPath(("Study", "M1"))
+        session.ensure_container(path, holds_records=True)
+        first = make_record("rec-1")
+        session.write_record(path, first)
+        session.write_record(path, make_record("rec-2"))
+        assert session.read_record(path, "rec-1").record == first
+        assert {item.record.record_id for item in session.list_records(path)} == {"rec-1", "rec-2"}
+
+    def test_records_only_hint_leaves_parents_ordinary(self, session: Session) -> None:
+        session.ensure_container(LogicalPath(("Study", "Cohort A", "M1")), holds_records=True)
+        sibling = LogicalPath(("Study", "Cohort A", "M2"))
+        session.ensure_container(sibling)
+        assert sibling in _paths(session.list_containers(LogicalPath(("Study", "Cohort A"))))
+
+    def test_records_only_hint_does_not_change_an_existing_container(
+        self, session: Session
+    ) -> None:
+        folder = LogicalPath(("Study",))
+        created = session.ensure_container(folder)
+        assert session.ensure_container(folder, holds_records=True) == created
+        session.ensure_container(folder / "Cohort A")  # still an ordinary container
+
+        page = LogicalPath(("Other", "M1"))
+        created = session.ensure_container(page, holds_records=True)
+        assert session.ensure_container(page) == created
+
+    def test_container_inside_records_only_container(self, session: Session, make_record) -> None:
+        path = LogicalPath(("Study", "M1"))
+        session.ensure_container(path, holds_records=True)
+        record = make_record()
+        session.write_record(path, record)
+        child = path / "Session 1"
+        if not self.records_only_is_a_leaf:
+            session.ensure_container(child)
+            assert _paths(session.list_containers(path)) == {child}
+            return
+        with pytest.raises(ValidationError):
+            session.ensure_container(child)
+        with pytest.raises(ValidationError):
+            session.ensure_container(child / "deeper", holds_records=True)
+        # Nothing half-created, and the records are untouched.
+        assert session.list_containers(path) == []
+        assert [item.record for item in session.list_records(path)] == [record]
 
     def test_names_with_spaces_and_unicode(self, session: Session, make_record) -> None:
         path = LogicalPath(("Fiber study", "Cohort ä"))

@@ -6,6 +6,8 @@ from metarelay.testing import BackendConformance, MemoryBackend, MemorySession
 
 
 class TestMemorySession(BackendConformance):
+    records_only_is_a_leaf = True
+
     @pytest.fixture
     def session(self) -> MemorySession:
         return MemorySession()

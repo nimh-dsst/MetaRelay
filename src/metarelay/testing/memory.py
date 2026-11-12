@@ -25,7 +25,7 @@ from metarelay.core.checksum import preview_checksum, record_checksum
 from metarelay.core.config import DestinationConfig
 from metarelay.core.conflict import WriteAction, WriteMode, decide_write
 from metarelay.core.destination import Destination
-from metarelay.core.errors import ConfigurationError, NotFoundError
+from metarelay.core.errors import ConfigurationError, NotFoundError, ValidationError
 from metarelay.core.path import ROOT, Container, LogicalPath
 from metarelay.core.preview import render_preview
 from metarelay.core.receipt import FileReceipt, Receipt
@@ -49,6 +49,7 @@ class MemorySession:
     def __init__(self, destination: str = "memory://test") -> None:
         self._destination = Destination.parse(destination).uri
         self._containers: set[LogicalPath] = {ROOT}
+        self._records_only: set[LogicalPath] = set()
         self._records: dict[tuple[LogicalPath, str], _Stored] = {}
         self.files: dict[tuple[LogicalPath, str], bytes] = {}
         """Files written with ``write_file``, for tests to inspect."""
@@ -63,9 +64,19 @@ class MemorySession:
         children = [path for path in self._containers if path != ROOT and path.parent == parent]
         return [Container(path=path) for path in sorted(children, key=lambda p: p.parts)]
 
-    def ensure_container(self, path: LogicalPath) -> Container:
-        for depth in range(1, len(path.parts) + 1):
-            self._containers.add(LogicalPath(path.parts[:depth]))
+    def ensure_container(self, path: LogicalPath, *, holds_records: bool = False) -> Container:
+        # Behaves like the strictest backend (LabArchives pages), so code tested
+        # here doesn't put a container inside a records-only one by accident.
+        parents = [LogicalPath(path.parts[:depth]) for depth in range(1, len(path.parts))]
+        for parent in parents:
+            if parent in self._records_only:
+                child = path.parts[len(parent.parts)]
+                raise ValidationError(f"{parent} holds records only, cannot contain {child!r}.")
+        if path not in self._containers:
+            self._containers.update(parents)
+            self._containers.add(path)
+            if holds_records:
+                self._records_only.add(path)
         return Container(path=path)
 
     def write_record(

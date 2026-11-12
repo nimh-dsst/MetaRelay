@@ -236,7 +236,8 @@ class LocalSession:
             )
         return [Container(path=parent / name) for name in names]
 
-    def ensure_container(self, path: LogicalPath) -> Container:
+    def ensure_container(self, path: LogicalPath, *, holds_records: bool = False) -> Container:
+        # Every container is a folder here, so holds_records changes nothing.
         path = _nfc_path(path)
         self._walk(path, create=True)
         return Container(path=path)
