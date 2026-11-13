@@ -10,21 +10,58 @@ pip install 'metarelay[labarchives]'
 ## Logging in
 
 LabArchives uses a browser login, so there is no `connect()`. Use
-`begin_login` and `complete_login` instead:
+`begin_login` and `complete_login` instead. This comes from the shared login
+helper the [examples](examples.md) use, `examples/login.py`:
 
+<!-- example: login.py#browser-login -->
 ```python
-from metarelay import begin_login, complete_login
-from metarelay.backends.labarchives import LabArchivesConfig
-
-config = LabArchivesConfig(akid="...", akpass="...")  # the institution's API key pair
-challenge = begin_login("labarchives://api.labarchives.com", "https://my.app/callback", config)
-# Send the user to challenge.auth_url. LabArchives sends them back to
-# https://my.app/callback?email=...&auth_code=...
-session = complete_login(challenge, callback_query_params, config)
+challenge = begin_login(uri, callback_url, config)
+# The person logs in at challenge.auth_url. LabArchives then sends their
+# browser to callback_url?email=...&auth_code=..., and those query
+# parameters finish the login.
+redirected = browser(challenge.auth_url)
+params = dict(parse_qsl(urlsplit(redirected).query))
+session = complete_login(challenge, params, config)
 ```
 
-`LabArchivesConfig` also reads `METARELAY_LABARCHIVES_AKID`,
+`browser` stands for whatever gets the person to `challenge.auth_url` and
+returns the address LabArchives sent them back to. A web app redirects to the
+link and serves `callback_url` itself. A terminal script prints the link and
+asks the person to paste the address (`ask_in_terminal` in the helper).
+
+`config` is a `LabArchivesConfig` holding the institution's API key pair:
+
+```python
+from metarelay.backends.labarchives import LabArchivesConfig
+
+config = LabArchivesConfig(akid="...", akpass="...")
+```
+
+Pass `None` instead to read `METARELAY_LABARCHIVES_AKID`,
 `METARELAY_LABARCHIVES_AKPASS`, and `METARELAY_LABARCHIVES_API_URL`.
+
+## Opening a notebook
+
+From the
+[`open_labarchives_notebook` example](../examples/open_labarchives_notebook/README.md),
+with `notebook` a notebook name and `inside` a `LogicalPath` within it
+(`ROOT` for the notebook itself):
+
+<!-- example: open_labarchives_notebook/open_labarchives_notebook.py#open-notebook -->
+```python
+# A LabArchives session's top-level containers are the account's notebooks.
+notebooks = [container.name for container in session.list_containers(ROOT)]
+if notebook not in notebooks:
+    raise NotFoundError(f"No notebook named {notebook!r}. Yours: {', '.join(notebooks)}.")
+
+# Folders and pages inside it. holds_records is True for a page.
+where = LogicalPath((notebook, *inside.parts))
+containers = session.list_containers(where)
+
+# Records are found by caption, on the page itself or on the
+# "MetaRelay records" page of a folder.
+records = {stored.record.record_id: stored for stored in session.list_records(where)}
+```
 
 ## Where things go
 
@@ -92,6 +129,9 @@ python -m metarelay.testing.labarchives_smoke --uri labarchives://localhost:8080
 ```
 
 The starting notebooks come from `docker/fake-labarchives/seed.json`.
+To log in and open a notebook from your own code instead, run the
+[`open_labarchives_notebook` example](../examples/open_labarchives_notebook/README.md)
+against the same fake.
 Tests use the same fake in-process:
 `metarelay.testing.labarchives_fake.FakeLabArchives` and `serve_fake`.
 

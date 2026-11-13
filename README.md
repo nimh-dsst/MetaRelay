@@ -39,6 +39,15 @@ pip install "metarelay[all]"          # every backend, NWB builders, test suite
 | `testing` | `pytest`, for the backend conformance suite |
 | `all` | everything above |
 
+## Getting started
+
+- [Quickstart](docs/quickstart.md): write a record to a folder, read it back,
+  and update it.
+- [Examples](docs/examples.md): runnable scripts for common tasks, including
+  logging in to LabArchives. None needs an account.
+- [Concepts](docs/concepts.md) and [architecture](docs/architecture.md): how
+  MetaRelay works, and where each piece lives in the code.
+
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup, tests, and PR
