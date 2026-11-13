@@ -45,6 +45,10 @@ uv build                      # sdist and wheel
 - Never call a real ELN API from the test suite. Use fakes or recorded
   responses. Live smoke tests are opt-in and gated by secrets.
 - Add a test for every bug fix and every new behavior.
+- `tests/examples/` runs every example in `examples/` end to end, and checks
+  that the code in the docs still matches the examples. After changing an
+  example, run `uv run python tests/examples/test_docs_snippets.py` to update
+  the docs.
 
 ## Dependencies
 
