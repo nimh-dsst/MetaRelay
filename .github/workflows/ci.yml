@@ -72,6 +72,45 @@ jobs:
       - name: Test the LabArchives backend with the oldest supported labapi
         run: uv run --locked --with "labapi==1.0.3" pytest tests/backends/test_labarchives.py tests/testing
 
+  elabftw:
+    # The eLabFTW backend against a real eLabFTW 6.0.9, from the dev stack in compose.yaml
+    # (one definition for local runs and CI). Catches API and client drift (plan R2).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      METARELAY_ELABFTW_TEST_API_URL: http://localhost:3148/api/v2
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Start eLabFTW
+        run: docker compose up -d --wait elabftw
+
+      - name: Seed a user and API key
+        run: docker compose exec -T elabftw bin/init db:populate /seed/populate.yml --yes --fast
+
+      - name: Install dependencies
+        run: uv sync --locked --extra elabftw
+
+      - name: Test the eLabFTW backend
+        run: uv run --locked pytest tests/backends/test_elabftw.py
+
+      # pyproject allows elabapi-python>=6, so test the floor too.
+      - name: Test the eLabFTW backend with the oldest supported elabapi-python
+        run: uv run --locked --with "elabapi-python==6.0.0" pytest tests/backends/test_elabftw.py
+
+      - name: Show eLabFTW logs
+        if: failure()
+        run: docker compose logs elabftw
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
