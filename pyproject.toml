@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 labarchives = ["labapi>=1.0.3,<2"]
-elabftw = ["elabapi-python>=5,<7"]
+elabftw = ["elabapi-python>=6,<7"]
 github = ["httpx>=0.28,<1"]
 nwb = [
     "pynwb>=4.1,<5",
@@ -44,6 +44,7 @@ metarelay = "metarelay.cli:main"
 [project.entry-points."metarelay.backends"]
 file = "metarelay.backends.local:LocalBackend"
 labarchives = "metarelay.backends.labarchives:LabArchivesBackend"
+elabftw = "metarelay.backends.elabftw:ElabFTWBackend"
 
 [project.urls]
 Repository = "https://github.com/nimh-dsst/MetaRelay"

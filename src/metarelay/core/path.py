@@ -5,8 +5,8 @@ A ``LogicalPath`` is a tuple of names, for example
 
 - Local and GitHub: nested directories
 - LabArchives: notebook, folders, and a page
-- eLabFTW: no folders, so tags, categories, or item titles (decided in the
-  eLabFTW spike)
+- eLabFTW: no folders, so every container is an entry, tagged with its path
+  (docs/adr/0001-elabftw-record-storage.md)
 
 The core never assumes a backend can nest folders.
 

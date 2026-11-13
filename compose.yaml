@@ -10,7 +10,11 @@
 # ACCESS_KEYID/ACCESS_PWD set to the same pair. Log in as demo@example.org;
 # the fake's login page logs you in without a password.
 #
-# The eLabFTW instance (elabftw/elabimg:6.0.9) joins this file in #6.
+# eLabFTW 6.0.9 is at http://localhost:3148 (or $ELABFTW_PORT). After the first
+# `up`, seed a user and API key (wiped with the containers; rerun after `down -v`):
+#   docker compose exec elabftw bin/init db:populate /seed/populate.yml --yes --fast
+# Then log in as metarelay@example.org / metarelay-dev-password, or use the API
+# key metarelay-dev-key. All eLabFTW credentials here are throwaway dev values.
 
 services:
   fake-labarchives:
@@ -34,3 +38,49 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  elabftw:
+    image: elabftw/elabimg:6.0.9
+    # 6.x runs unprivileged; as root php-fpm refuses to start ("user has not been defined").
+    user: "1000:1000"
+    depends_on:
+      elabftw-mysql:
+        condition: service_healthy
+    ports:
+      - "${ELABFTW_PORT:-3148}:8080"
+    environment:
+      DB_HOST: elabftw-mysql
+      DB_NAME: elabftw
+      DB_USER: elabftw
+      DB_PASSWORD: elabftw-dev
+      # A throwaway key from vendor/bin/generate-defuse-key; never use it for real data.
+      SECRET_KEY: def000008e1b010fce484d59295bc4aa71b1b514cba6343e9ae5de126385557578eb58b0e91d211997508be14761fe4b25c7d5872ac6319306026bef2f78ea7009c8e85b
+      SITE_URL: http://localhost:${ELABFTW_PORT:-3148}
+      DISABLE_HTTPS: "true"
+      AUTO_DB_INIT: "true"
+      DEV_MODE: "true"
+    volumes:
+      - ./docker/elabftw/populate.yml:/seed/populate.yml:ro
+    # Unprivileged, so the dirs it writes must be writable by uid 1000.
+    # tmpfs: a throwaway dev/CI instance keeps nothing between runs.
+    tmpfs:
+      - /var/cache/elabftw:uid=1000,gid=1000
+      - /var/lib/elabftw:uid=1000,gid=1000
+      - /run:uid=1000,gid=1000,exec
+    healthcheck:
+      # no curl/wget in the image; php is there.
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://localhost:8080/healthcheck.php') === false ? 1 : 0);"]
+      interval: 5s
+      retries: 60
+
+  elabftw-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: elabftw-dev-root
+      MYSQL_DATABASE: elabftw
+      MYSQL_USER: elabftw
+      MYSQL_PASSWORD: elabftw-dev
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pelabftw-dev-root"]
+      interval: 5s
+      retries: 60

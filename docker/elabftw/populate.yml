@@ -1,0 +1,12 @@
+# db:populate config for the MetaRelay dev/CI eLabFTW instance.
+skip_confirm: true
+generate_random_experiments: false
+generate_random_resources: false
+teams:
+  - name: MetaRelay
+    users:
+      - email: metarelay@example.org
+        password: metarelay-dev-password
+        firstname: Meta
+        lastname: Relay
+        api_key: metarelay-dev-key
