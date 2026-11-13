@@ -57,6 +57,10 @@ def test_a_change_at_the_destination_stops_the_run_until_forced(tmp_path: Path, 
     err = capsys.readouterr().err
     assert "'fiber_diameter_um': 300.0" in err
     assert "--force" in err
+    # The script rewrites its own record on every run, so it must not tell the
+    # person that copying the change into it keeps the change.
+    assert "copy it into" not in err
+    assert "docs/concepts.md#handling-a-conflict" in err
     assert "300.0" in record_file.read_text()  # not overwritten
 
     assert run(folder, receipts, "--force") == 0

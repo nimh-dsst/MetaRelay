@@ -58,12 +58,16 @@ and changes nothing:
 ```
 implant-M1 changed at file:///…/metadata since this script last wrote it, so MetaRelay did not overwrite it.
   At the destination now: {'fiber_diameter_um': 300.0, 'target_region': 'VTA'}
-To keep that change, copy it into the record in this script, then run again with --force.
 To replace it with this script's record, run again with --force.
+This script always writes the same record, so it can't keep that change. To keep one in your own code, see docs/concepts.md#handling-a-conflict.
 ```
 
 MetaRelay never picks a winner. The person decides, and `--force` is how
 they say so. Editing the table in `implant-M1.md` counts as a change too.
+
+This script can only replace the change, because it writes the same record
+every run. Application code can keep it instead. See
+[Handling a conflict](../../docs/concepts.md#handling-a-conflict).
 
 ## Run it against LabArchives
 

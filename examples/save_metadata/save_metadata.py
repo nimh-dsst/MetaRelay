@@ -189,9 +189,9 @@ def explain_conflict(session: Session, where: LogicalPath) -> None:
         f"{RECORD_ID} changed at {session.destination} since this script last wrote it, "
         "so MetaRelay did not overwrite it.\n"
         f"  At the destination now: {theirs}\n"
-        "To keep that change, copy it into the record in this script, then run again "
-        "with --force.\n"
-        "To replace it with this script's record, run again with --force.",
+        "To replace it with this script's record, run again with --force.\n"
+        "This script always writes the same record, so it can't keep that change. "
+        "To keep one in your own code, see docs/concepts.md#handling-a-conflict.",
         file=sys.stderr,
     )
 
