@@ -1,0 +1,27 @@
+{
+  "users": [
+    {
+      "email": "demo@example.org",
+      "auth_code": "demo",
+      "notebooks": [
+        {
+          "name": "Lab Notebook",
+          "tree": [
+            {
+              "folder": "Example experiment",
+              "children": [
+                {
+                  "page": "Notes",
+                  "entries": [
+                    {"text": "<p>A page that existed before MetaRelay. It is left alone.</p>"}
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {"name": "Test notebook", "tree": []}
+      ]
+    }
+  ]
+}

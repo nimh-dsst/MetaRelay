@@ -43,6 +43,7 @@ metarelay = "metarelay.cli:main"
 
 [project.entry-points."metarelay.backends"]
 file = "metarelay.backends.local:LocalBackend"
+labarchives = "metarelay.backends.labarchives:LabArchivesBackend"
 
 [project.urls]
 Repository = "https://github.com/nimh-dsst/MetaRelay"

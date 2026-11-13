@@ -13,8 +13,9 @@ same way for every destination::
 
 Messages are shown to users. Never put a request URL, token, or other
 credential in a message: ``labapi`` signs requests in the query string, so
-``str()`` of a native HTTP error can leak secrets. Chain the native error with
-``raise ... from error`` instead.
+``str()`` of a native HTTP error can leak secrets. Chain the native error
+(``raise ... from error``) only when it can't hold secrets: a chained
+``__cause__`` is printed in tracebacks and logs. Otherwise use ``from None``.
 """
 
 from __future__ import annotations
@@ -50,7 +51,9 @@ class AuthenticationError(MetaRelayError):
 class BackendUnavailableError(MetaRelayError):
     """The destination could not be reached or returned a server error.
 
-    Usually temporary: a network failure, a timeout, or a 5xx response.
+    Usually temporary: a network failure, a timeout, or a 5xx response. Also
+    raised for an error the destination reports that MetaRelay can't classify
+    more precisely.
     """
 
 
@@ -64,6 +67,11 @@ class ConflictError(MetaRelayError):
     Raised when the remote record changed since the last receipt, when a
     different record already uses the same ID, or when ``create`` mode finds an
     existing record.
+
+    Also raised, by reads as well as writes, when a name at the destination is
+    ambiguous (two LabArchives folders with the same name, for example), since
+    MetaRelay can't tell which one is meant. Renaming one at the destination
+    fixes it.
     """
 
 
