@@ -25,6 +25,24 @@ Requests go to `https://<host>/api/v2`; set `api_url` for anything else.
 `ElabFTWConfig` also reads `METARELAY_ELABFTW_TOKEN`,
 `METARELAY_ELABFTW_API_URL`, and `METARELAY_ELABFTW_VERIFY_TLS`.
 
+## Opening an entry
+
+The [`open_elabftw_experiment` example](../examples/open_elabftw_experiment/README.md)
+lists the entries inside a path and loads a record from it:
+
+<!-- example: open_elabftw_experiment/open_elabftw_experiment.py#open-entry -->
+```python
+# eLabFTW has no folders: every container is an entry (an experiment or
+# a resource). holds_records is True for a records-only entry.
+containers = session.list_containers(where)
+
+# An entry's records are in the entry itself: in its metadata, and shown
+# as tables in its body and as eLabFTW fields.
+records = {}
+if where != ROOT:
+    records = {stored.record.record_id: stored for stored in session.list_records(where)}
+```
+
 ## Where things go
 
 eLabFTW has no folders, so every container is an entry.

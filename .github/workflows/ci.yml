@@ -100,8 +100,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra elabftw
 
-      - name: Test the eLabFTW backend
-        run: uv run --locked pytest tests/backends/test_elabftw.py
+      - name: Test the eLabFTW backend and examples
+        run: uv run --locked pytest tests/backends/test_elabftw.py tests/examples -k elabftw
 
       # pyproject allows elabapi-python>=6, so test the floor too.
       - name: Test the eLabFTW backend with the oldest supported elabapi-python
