@@ -70,7 +70,7 @@ jobs:
 
       # pyproject allows labapi>=1.0.3, and Chronoxiv pins 1.0.3, so test the floor too.
       - name: Test the LabArchives backend with the oldest supported labapi
-        run: uv run --locked --with "labapi==1.0.3" pytest tests/backends/test_labarchives.py tests/testing
+        run: uv run --locked --with "labapi==1.0.3" pytest tests/backends/test_labarchives.py tests/testing tests/examples
 
   elabftw:
     # The eLabFTW backend against a real eLabFTW 6.0.9, from the dev stack in compose.yaml
@@ -100,8 +100,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra elabftw
 
-      - name: Test the eLabFTW backend
-        run: uv run --locked pytest tests/backends/test_elabftw.py
+      - name: Test the eLabFTW backend and examples
+        run: uv run --locked pytest tests/backends/test_elabftw.py tests/examples -k elabftw
 
       # pyproject allows elabapi-python>=6, so test the floor too.
       - name: Test the eLabFTW backend with the oldest supported elabapi-python
