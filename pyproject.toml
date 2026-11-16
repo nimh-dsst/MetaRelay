@@ -63,6 +63,8 @@ packages = ["src/metarelay"]
 include = [
     "/src",
     "/tests",
+    "/examples",
+    "/docs",
     "/pyproject.toml",
     "/uv.lock",
     "/.python-version",
@@ -73,13 +75,15 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The repository root, so tests can import the runnable examples in examples/.
+pythonpath = ["."]
 addopts = ["--strict-markers", "--strict-config", "-ra"]
 xfail_strict = true
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "tests", "."]  # "." for the examples package
 
 [tool.ruff.lint]
 select = [
