@@ -1,8 +1,9 @@
 # ADR 0001: How the eLabFTW backend stores records
 
-- **Status:** Accepted 2026-11-13. Two parts still need confirming with DSST:
-  the layout (one entry per session or page, see Decision 2) and the
-  direct-edit behavior (D7, see Decision 3).
+- **Status:** Accepted 2026-11-13. Confirmed by DSST on 2026-11-16: many
+  records per entry (Decision 2), refusing to overwrite hand edits until
+  someone chooses to (D7, Decision 3), experiments, categories left to the
+  lab, eLabFTW 6.0.9, and lookups limited to the API key's team.
 - **Issue:** #6. Plan §3.3, D3, D7, R2.
 - **Tested against:** eLabFTW 6.0.9 (`elabftw/elabimg:6.0.9`) with
   `elabapi-python` 6.0.1, using the dev stack in `compose.yaml`.
@@ -158,5 +159,3 @@ parameter, 5.3.0 has a different `patch_experiment`). CI also tests 6.0.0.
   JSON in `metadata.metarelay` keeps the real structure.
 - **A hand edit to a field is visible but not used.** MetaRelay reports it as
   a conflict; it never reads values back from `extra_fields` or the body.
-- **To confirm with DSST:** the layout (Decision 2) and the direct-edit
-  behavior (Decision 3).
