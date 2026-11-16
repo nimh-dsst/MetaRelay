@@ -40,6 +40,21 @@ and never writes it to a receipt, log, or file. A fine-grained token needs
 | `max_file_bytes` | 1 MB | The largest file `write_file` accepts, up to 50 MB |
 | `timeout` | 30 | Seconds per request |
 
+## Opening a folder
+
+The [`open_github_repo` example](../examples/open_github_repo/README.md) lists
+the folders inside a path and loads a record from it:
+
+<!-- example: open_github_repo/open_github_repo.py#open-folder -->
+```python
+# Containers are folders in the repository, under the URI's prefix.
+containers = session.list_containers(where)
+
+# Each record is a .json file, with a .md preview beside it that GitHub
+# shows as tables.
+records = {stored.record.record_id: stored for stored in session.list_records(where)}
+```
+
 ## Where things go
 
 The same layout as the local backend:

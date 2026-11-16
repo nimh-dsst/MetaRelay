@@ -43,6 +43,25 @@ def fake_labarchives(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[FakeLabA
 
 
 @pytest.fixture
+def fake_github(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """A fake GitHub API with an empty ``my-lab/metadata``, served in this process.
+
+    Yields the ``github://`` URI to write under, with the
+    ``METARELAY_GITHUB_*`` variables set to reach the fake.
+    """
+    pytest.importorskip("httpx")
+    from metarelay.testing.github_fake import FakeGitHub
+    from metarelay.testing.github_fake import serve_fake as serve_github
+
+    fake = FakeGitHub(token="fake-token")
+    fake.add_repo("my-lab/metadata")
+    with serve_github(fake) as url:
+        monkeypatch.setenv("METARELAY_GITHUB_TOKEN", "fake-token")
+        monkeypatch.setenv("METARELAY_GITHUB_API_URL", url)
+        yield "github://my-lab/metadata@main/records"
+
+
+@pytest.fixture
 def run_module() -> Callable[..., subprocess.CompletedProcess[str]]:
     """Run an example the way its README does: ``python -m examples.<name>``.
 

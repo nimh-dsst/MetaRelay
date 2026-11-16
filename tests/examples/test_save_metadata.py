@@ -1,4 +1,4 @@
-"""The save_metadata example, run end to end against a folder and the fake LabArchives."""
+"""The save_metadata example, run end to end against a folder and the fake servers."""
 
 import json
 from pathlib import Path
@@ -93,3 +93,10 @@ def test_writes_to_labarchives_with_the_same_code(fake_labarchives, tmp_path: Pa
     assert main(args) == 0  # the receipts carry over between runs
     files = [entry.filename for entry in fake._entries.values()]
     assert files.count("implant-M1.json") == 1  # updated in place, not added twice
+
+
+def test_writes_to_github_with_the_same_code(fake_github: str, tmp_path: Path, capsys) -> None:
+    args = [fake_github, "--receipts", str(tmp_path / "receipts.json")]
+    assert main(args) == 0
+    assert main(args) == 0  # the receipts carry over between runs
+    assert "Updated it:   {'fiber_diameter_um': 200.0" in capsys.readouterr().out

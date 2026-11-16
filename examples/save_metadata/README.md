@@ -92,3 +92,28 @@ For real LabArchives, set the institution's key pair, drop
 `labarchives://api.labarchives.com`. The script prints a login link. Log in,
 then paste the address your browser was sent back to. That page may not
 load, which is expected: only its address matters.
+
+## Run it against GitHub
+
+Install the extra, and start the fake GitHub API in another terminal (no
+account):
+
+```sh
+uv sync --extra github
+uv run python -m metarelay.testing.github_fake --port 8081 --repo my-lab/metadata --token fake-token
+```
+
+Then point the script at it:
+
+```sh
+export METARELAY_GITHUB_TOKEN=fake-token METARELAY_GITHUB_API_URL=http://127.0.0.1:8081
+uv run python -m examples.save_metadata github://my-lab/metadata@main/records
+```
+
+The record is `records/Fiber study/Cohort A/implant-M1.json` in the
+repository, with `implant-M1.md` beside it, each written as a commit. Then
+open it with the [`open_github_repo` example](../open_github_repo/README.md).
+
+For real GitHub, set `METARELAY_GITHUB_TOKEN` to a token with **Contents:
+read and write** on the repository, drop `METARELAY_GITHUB_API_URL`, and use
+`github://<owner>/<repo>@<branch>/records`. The branch must already exist.

@@ -1,4 +1,4 @@
-"""Open a session to any destination from a terminal. Both examples use it.
+"""Open a session to any destination from a terminal. Every example uses it.
 
 Most backends open with ``connect()``. LabArchives needs a browser login,
 which a library can't show, so it takes two calls with the browser in
