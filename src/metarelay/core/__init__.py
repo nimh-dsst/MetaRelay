@@ -26,6 +26,8 @@ from metarelay.core.path import ROOT, Container, LogicalPath
 from metarelay.core.preview import (
     Heading,
     Preview,
+    PreviewDiff,
+    PreviewEdit,
     Table,
     register_renderer,
     render_preview,
@@ -54,6 +56,8 @@ __all__ = [
     "NotFoundError",
     "PermissionDeniedError",
     "Preview",
+    "PreviewDiff",
+    "PreviewEdit",
     "Receipt",
     "Record",
     "SchemaRegistry",

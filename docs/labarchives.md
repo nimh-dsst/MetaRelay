@@ -75,6 +75,12 @@ not the table, so its receipt keeps the table's checksum from MetaRelay's
 last write, which the caption stores. Keep the edit by copying it into
 the record, or replace it with `mode="force"`.
 
+The error's `preview_diff` lists the values that changed in the table entry
+([Concepts](concepts.md#write-modes)). LabArchives rewrites the HTML it
+stores, so MetaRelay reads only the text of headings and table cells. That
+is best effort: if LabArchives changes the markup more than that, the list
+may be empty or marked incomplete.
+
 ## Developing without a LabArchives account
 
 `docker compose up` starts a fake LabArchives server on port 8080 (set

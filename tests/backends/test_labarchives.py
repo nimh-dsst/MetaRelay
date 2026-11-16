@@ -105,6 +105,10 @@ class TestLabArchivesBackend(BackendConformance):
         receipt = session.read_record(path, record_id).receipt
         self.fake.edit_entry(receipt.backend_ids["preview_entry_id"], text)
 
+    def replace_in_preview(self, session, path, record_id, old, new) -> None:
+        eid = session.read_record(path, record_id).receipt.backend_ids["preview_entry_id"]
+        self.fake.edit_entry(eid, self.fake.entry_data(eid).replace(old, new))
+
 
 @pytest.fixture
 def session(base_url: str) -> LabArchivesSession:

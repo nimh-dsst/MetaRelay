@@ -44,6 +44,31 @@ change at the destination, so they are not overwritten silently. That holds
 even if you read the record after the edit: a read returns the JSON, not the
 preview, so its receipt still describes the preview MetaRelay last wrote.
 
+The `ConflictError` for such an edit says what changed. Its `preview_diff`
+lists each table row whose value differs from what MetaRelay wrote, and
+whether that list is complete:
+
+```python
+try:
+    session.write_record(path, record, prior_receipt=receipt)
+except ConflictError as error:
+    diff = error.preview_diff
+    if diff is None:
+        raise  # a different kind of conflict
+    for edit in diff.edits:
+        print(edit.record_id, edit.table, edit.field, edit.written, "->", edit.current)
+    if not diff.complete:
+        print("Other changes were made too; look at the entry.")
+```
+
+The JSON stays the source of truth: MetaRelay never takes a value from the
+preview by itself. To keep an edit, copy it into the record and write again
+with `mode="force"`. `complete` is `False` when someone also changed
+something MetaRelay can't list, such as text added between the tables.
+The written values come from rendering the stored record again, so if a
+MetaRelay upgrade or a schema's renderer changed how a value reads since the
+last write, that row shows up as an edit too.
+
 ## Errors
 
 Every backend raises the same errors, all subclasses of `MetaRelayError`:

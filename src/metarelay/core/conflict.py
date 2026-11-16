@@ -16,9 +16,11 @@ tested without a backend::
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import StrEnum
 
 from metarelay.core.errors import ConflictError, ValidationError
+from metarelay.core.preview import PreviewDiff, best_effort
 from metarelay.core.receipt import Receipt
 
 __all__ = ["WriteAction", "WriteMode", "decide_write"]
@@ -56,6 +58,7 @@ def decide_write(
     remote_checksum: str | None,
     prior_receipt: Receipt | None,
     remote_preview_checksum: str | None = None,
+    preview_diff: Callable[[], PreviewDiff | None] | None = None,
 ) -> WriteAction:
     """Decide whether to write, skip, or refuse.
 
@@ -68,6 +71,9 @@ def decide_write(
         prior_receipt: The receipt from the last write or read, if any.
         remote_preview_checksum: ``preview_checksum`` of the preview at the
             destination now, for backends that track previews (D7).
+        preview_diff: Says what changed in an edited preview (usually a
+            ``preview.preview_diff`` call). Called only when the preview was
+            edited; its result goes on the ``ConflictError``.
 
     A record that was deleted at the destination since the last sync is
     written again, as in Chronoxiv.
@@ -106,10 +112,13 @@ def decide_write(
         and remote_preview_checksum is not None
         and remote_preview_checksum != prior_receipt.preview_checksum
     ):
+        diff = best_effort(preview_diff) if preview_diff is not None else None
         raise ConflictError(
-            "The notebook entry was edited directly since it was last synced. To keep "
-            "the edit, copy it into the record first. Then write again with "
-            "mode='force' to replace the entry."
+            "The notebook entry was edited directly since it was last synced. "
+            + (diff.describe() + " " if diff is not None else "")
+            + "To keep the edit, copy it into the record first. Then write again "
+            "with mode='force' to replace the entry.",
+            preview_diff=diff,
         )
 
     return WriteAction.SKIP if remote_checksum == local_checksum else WriteAction.WRITE

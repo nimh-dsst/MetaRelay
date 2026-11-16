@@ -68,6 +68,12 @@ record after the edit. Keep the edit by copying it into the record, or
 replace it with `mode="force"`. Forcing rebuilds the whole entry from the
 stored records, so it also replaces hand edits to the other records' tables.
 
+The error's `preview_diff` says what changed ([Concepts](concepts.md#write-modes)):
+each eLabFTW field whose value differs from what MetaRelay wrote, with its
+record ID, so an edit to another record in the same entry is listed too.
+It is complete only if nothing else changed. An edit to the body's tables
+can't be read back, so it leaves the list incomplete.
+
 ## Limits
 
 - A write reads the entry and then replaces its body and metadata. eLabFTW

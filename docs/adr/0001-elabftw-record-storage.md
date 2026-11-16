@@ -3,7 +3,8 @@
 - **Status:** Accepted 2026-11-13. Confirmed by DSST on 2026-11-16: many
   records per entry (Decision 2), refusing to overwrite hand edits until
   someone chooses to (D7, Decision 3), experiments, categories left to the
-  lab, eLabFTW 6.0.9, and lookups limited to the API key's team.
+  lab, eLabFTW 6.0.9, and lookups limited to the API key's team. DSST also
+  asked to see what a hand edit changed; see Decision 3.
 - **Issue:** #6. Plan §3.3, D3, D7, R2.
 - **Tested against:** eLabFTW 6.0.9 (`elabftw/elabimg:6.0.9`) with
   `elabapi-python` 6.0.1, using the dev stack in `compose.yaml`.
@@ -122,6 +123,18 @@ So each write rebuilds the whole body and `extra_fields` from the records in
 `force` replaces the whole entry's tables and fields, including hand edits to
 other records' sections. The error message says so.
 
+**The conflict says what changed.** DSST asked for MetaRelay to read hand
+edits, while keeping D7 (nothing changes without someone approving it). So
+the `ConflictError` carries a `PreviewDiff`: each field whose value differs
+from what MetaRelay wrote (rebuilt from the stored records), with its record
+ID, table and row, and whether that list is complete. It is complete when
+putting the listed values back gives exactly the entry MetaRelay saved, so
+an edit to the body or to a field's settings makes it incomplete. The body
+isn't read back: fields are structured, sanitized HTML isn't. MetaRelay
+never takes a value from the fields itself; the caller copies an accepted
+edit into the record. Every backend that keeps previews does the same
+(conformance: `test_preview_edit_says_what_changed`).
+
 ### 4. An adapter isolates `elabapi-python` (R2)
 
 Everything that touches the generated client (and raw responses, for
@@ -157,5 +170,7 @@ parameter, 5.3.0 has a different `patch_experiment`). CI also tests 6.0.0.
   paths still work; their deepest prefixes just have no tag.
 - **`extra_fields` flatten nested values.** Labels carry the record ID. The
   JSON in `metadata.metarelay` keeps the real structure.
-- **A hand edit to a field is visible but not used.** MetaRelay reports it as
-  a conflict; it never reads values back from `extra_fields` or the body.
+- **A hand edit to a field is reported, not used.** The conflict lists the
+  old and new values; MetaRelay never writes a value from `extra_fields` or
+  the body into a record. Edits to the body's tables are detected but not
+  listed.

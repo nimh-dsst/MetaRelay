@@ -12,6 +12,7 @@ from metarelay import (
     WriteMode,
 )
 from metarelay.core.conflict import decide_write
+from metarelay.core.preview import PreviewDiff
 
 LOCAL = "local"
 PRIOR = "prior"
@@ -150,3 +151,50 @@ def test_preview_conflict_advice_works() -> None:
     assert decide(WriteMode.FORCE, remote=LOCAL, prior=prior, remote_preview="p2") is (
         WriteAction.WRITE
     )
+
+
+def test_a_preview_edit_conflict_carries_the_diff() -> None:
+    diff = PreviewDiff(edits=[], complete=False)
+    with pytest.raises(ConflictError, match="can't tell what changed") as raised:
+        decide_write(
+            mode=WriteMode.UPSERT,
+            local_checksum=LOCAL,
+            remote_checksum=PRIOR,
+            prior_receipt=receipt(preview_checksum="p1"),
+            remote_preview_checksum="p2",
+            preview_diff=lambda: diff,
+        )
+    assert raised.value.preview_diff is diff
+
+
+def test_the_diff_is_only_worked_out_for_an_edited_preview() -> None:
+    calls: list[str] = []
+    action = decide_write(
+        mode=WriteMode.UPSERT,
+        local_checksum=LOCAL,
+        remote_checksum=PRIOR,
+        prior_receipt=receipt(preview_checksum="p1"),
+        remote_preview_checksum="p1",
+        preview_diff=lambda: calls.append("called"),  # type: ignore[arg-type,func-returns-value]
+    )
+    assert action is WriteAction.WRITE
+    assert calls == []
+    with pytest.raises(ConflictError) as raised:
+        decide(remote=OTHER, prior=receipt())
+    assert raised.value.preview_diff is None
+
+
+def test_a_failing_diff_still_raises_the_conflict() -> None:
+    def broken() -> PreviewDiff:
+        raise KeyError("renderer broke")
+
+    with pytest.raises(ConflictError, match="edited directly") as raised:
+        decide_write(
+            mode=WriteMode.UPSERT,
+            local_checksum=LOCAL,
+            remote_checksum=PRIOR,
+            prior_receipt=receipt(preview_checksum="p1"),
+            remote_preview_checksum="p2",
+            preview_diff=broken,
+        )
+    assert raised.value.preview_diff is None

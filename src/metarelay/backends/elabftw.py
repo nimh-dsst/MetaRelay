@@ -69,6 +69,7 @@ Limits
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import unicodedata
 from collections.abc import Mapping
@@ -91,7 +92,7 @@ from metarelay.core.errors import (
     ValidationError,
 )
 from metarelay.core.path import ROOT, Container, LogicalPath
-from metarelay.core.preview import Table, render_preview
+from metarelay.core.preview import PreviewDiff, Table, best_effort, diff_blocks, render_preview
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
 from metarelay.core.session import StoredRecord
@@ -259,8 +260,14 @@ def _records(ours: Mapping[str, Any], where: str) -> dict[str, Record]:
     return records
 
 
-def _render(path: LogicalPath, kind: str, records: Mapping[str, Record]) -> tuple[str, dict, dict]:
-    """The body, ``extra_fields``, and field groups for an entry."""
+_Origin = tuple[str, str | None, str]
+"""Where a field's value comes from: record ID, table title, row name."""
+
+
+def _render(
+    path: LogicalPath, kind: str, records: Mapping[str, Record]
+) -> tuple[str, dict, dict, dict[str, _Origin]]:
+    """The body, ``extra_fields``, field groups, and each record field's origin."""
     if records:
         body = "\n<hr>\n".join(render_preview(records[key]).html for key in sorted(records))
     elif kind == FOLDER:
@@ -270,12 +277,17 @@ def _render(path: LogicalPath, kind: str, records: Mapping[str, Record]) -> tupl
 
     groups = [{"id": 1, "name": "MetaRelay"}]
     fields: dict[str, dict[str, Any]] = {}
+    origins: dict[str, _Origin] = {}
 
-    def add(label: str, value: str, group_id: int, **extra: Any) -> None:
+    def add(
+        label: str, value: str, group_id: int, origin: _Origin | None = None, **extra: Any
+    ) -> None:
         unique, count = label, 1
         while unique in fields:
             count += 1
             unique = f"{label} ({count})"
+        if origin is not None:
+            origins[unique] = origin
         fields[unique] = {
             "type": "text",
             "value": value,
@@ -295,8 +307,48 @@ def _render(path: LogicalPath, kind: str, records: Mapping[str, Record]) -> tupl
             for key, value in table.rows:
                 # Prefix the table title only when two tables share a row name.
                 label = key if keys.count(key) == 1 else f"{table.title} · {key}"
-                add(f"{record_id} · {label}", value, group_id)
-    return body, fields, {"extra_fields_groups": groups, "display_main_text": True}
+                add(f"{record_id} · {label}", value, group_id, (record_id, table.title, key))
+    return body, fields, {"extra_fields_groups": groups, "display_main_text": True}, origins
+
+
+def _field_diff(
+    entry: Mapping[str, Any],
+    ours: Mapping[str, Any],
+    path: LogicalPath,
+    records: Mapping[str, Record],
+) -> PreviewDiff:
+    """What someone changed in the entry's fields since MetaRelay wrote them.
+
+    The fields MetaRelay wrote are rebuilt from the stored records and
+    compared with the current ones by ``diff_blocks``, the rule every backend
+    uses. The edits are complete when putting the written values back gives
+    exactly the entry MetaRelay saved: then nothing else changed (the body,
+    the path fields, a field's settings, a field added by hand).
+    """
+    _, written, _, origins = _render(path, ours["kind"], records)
+    current = entry["metadata"].get("extra_fields") or {}
+    if not isinstance(current, dict):
+        return PreviewDiff(edits=[], complete=False)
+    reverted = copy.deepcopy(current)
+    tables: dict[str, tuple[list[Table], list[Table]]] = {}
+    for label, (record_id, title, row) in origins.items():
+        value = written[label]["value"]
+        now = current.get(label)
+        if not isinstance(now, dict):
+            reverted[label] = copy.deepcopy(written[label])
+        elif now.get("value") != value:
+            reverted[label]["value"] = value
+        old, new = tables.setdefault(record_id, ([], []))
+        if not old or old[-1].title != title:
+            old.append(Table(title=title, rows=[]))
+            new.append(Table(title=title, rows=[]))
+        old[-1].rows.append((row, value))
+        if isinstance(now, dict):
+            new[-1].rows.append((row, "" if now.get("value") is None else str(now["value"])))
+    clean = _entry_checksum(entry.get("body"), reverted) == ours.get("preview_checksum")
+    diffs = [diff_blocks(rid, old, new, clean=clean) for rid, (old, new) in tables.items()]
+    edits = [edit for diff in diffs for edit in diff.edits]
+    return PreviewDiff(edits=edits, complete=clean and all(diff.complete for diff in diffs))
 
 
 def _metadata(
@@ -306,7 +358,7 @@ def _metadata(
     records: Mapping[str, Record],
 ) -> tuple[str, dict[str, Any]]:
     """The entry's new body and metadata, keeping keys MetaRelay doesn't own."""
-    body, fields, elabftw = _render(path, kind, records)
+    body, fields, elabftw, _ = _render(path, kind, records)
     metadata = {k: v for k, v in previous.items() if k not in {"metarelay", "extra_fields"}}
     metadata["elabftw"] = {**previous.get("elabftw", {}), **elabftw}
     metadata["extra_fields"] = fields
@@ -396,11 +448,14 @@ class ElabFTWSession:
         forced = WriteMode(mode) is WriteMode.FORCE
         # Like decide_write: identical content with no receipt is not a conflict.
         if edited and not forced and (action is WriteAction.WRITE or prior_receipt is not None):
+            diff = best_effort(lambda: _field_diff(entry, ours, path, records))
             raise ConflictError(
                 f"The eLabFTW entry for {self._describe(path)} was edited directly since "
-                "MetaRelay last wrote it. To keep the edit, copy it into the record "
-                "first. Then write again with mode='force', which rebuilds the whole "
-                "entry, including the other records' tables."
+                f"MetaRelay last wrote it. {diff.describe() + ' ' if diff else ''}"
+                "To keep the edit, copy it into the record first. Then write again with "
+                "mode='force', which rebuilds the whole entry, including the other "
+                "records' tables.",
+                preview_diff=diff,
             )
         if action is WriteAction.WRITE:
             records[record.record_id] = record

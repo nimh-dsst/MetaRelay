@@ -20,6 +20,11 @@ credential in a message: ``labapi`` signs requests in the query string, so
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from metarelay.core.preview import PreviewDiff
+
 __all__ = [
     "AuthenticationError",
     "BackendUnavailableError",
@@ -72,7 +77,15 @@ class ConflictError(MetaRelayError):
     ambiguous (two LabArchives folders with the same name, for example), since
     MetaRelay can't tell which one is meant. Renaming one at the destination
     fixes it.
+
+    When the conflict is a direct edit to the readable preview (D7),
+    ``preview_diff`` lists what changed, so the caller can show it and let a
+    person copy the edit into the record. It is ``None`` for other conflicts.
     """
+
+    def __init__(self, message: str, *, preview_diff: PreviewDiff | None = None) -> None:
+        super().__init__(message)
+        self.preview_diff = preview_diff
 
 
 class ValidationError(MetaRelayError, ValueError):
