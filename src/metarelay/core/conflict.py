@@ -18,12 +18,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from metarelay.core.errors import ConflictError, ValidationError
-from metarelay.core.preview import PreviewDiff, best_effort
+from metarelay.core.preview import PreviewDiff, PreviewEdit, apply_edits, best_effort
 from metarelay.core.receipt import Receipt
 
-__all__ = ["WriteAction", "WriteMode", "decide_write"]
+if TYPE_CHECKING:
+    from metarelay.core.path import LogicalPath
+    from metarelay.core.record import Record
+    from metarelay.core.registry import SchemaRegistry
+    from metarelay.core.session import Session, StoredRecord
+
+__all__ = ["WriteAction", "WriteMode", "accept_edits", "decide_write"]
 
 
 class WriteMode(StrEnum):
@@ -122,3 +129,55 @@ def decide_write(
         )
 
     return WriteAction.SKIP if remote_checksum == local_checksum else WriteAction.WRITE
+
+
+def accept_edits(
+    session: Session,
+    path: LogicalPath,
+    record: Record,
+    diff: PreviewDiff,
+    *,
+    registry: SchemaRegistry | None = None,
+) -> dict[str, StoredRecord]:
+    """Keep the notebook edits a person accepted: copy them into the records and write them.
+
+    ``record`` is the one whose write raised the ``ConflictError`` that
+    carried ``diff``. On eLabFTW one entry holds several records, the diff
+    lists edits to all of them, and a forced write rebuilds the whole entry,
+    so the other records are read from the destination, get their edits
+    too, and are written as well; otherwise their edits would be lost. Every
+    edit is applied (``apply_edits``) before anything is written.
+
+    The writes are forced, so a change someone makes at the destination
+    while this runs is overwritten, like any forced write.
+
+    Returns every record written, with its edits, and a receipt read after
+    the last write; ``record`` comes first.
+
+    Raises:
+        ConflictError: If ``diff`` is incomplete: someone also changed
+            something MetaRelay can't list, so nothing is written.
+        ValidationError: If an edit can't be applied; nothing is written.
+    """
+    if not diff.complete:
+        raise ConflictError(
+            "Someone also changed something in the entry that MetaRelay can't list, so "
+            "the edits can't be accepted automatically. Look at the entry, copy what you "
+            "want into the record, and write it with mode='force'.",
+            preview_diff=diff,
+        )
+    by_record: dict[str, list[PreviewEdit]] = {record.record_id: []}
+    for edit in diff.edits:
+        by_record.setdefault(edit.record_id, []).append(edit)
+    updated = {}
+    for record_id, edits in by_record.items():
+        base = (
+            record if record_id == record.record_id else session.read_record(path, record_id).record
+        )
+        updated[record_id] = apply_edits(base, edits, registry=registry)
+    # The other records first: each forced write rebuilds an eLabFTW entry,
+    # and the last one, ``record``'s, is the one the caller asked for.
+    for record_id in reversed(list(updated)):
+        session.write_record(path, updated[record_id], mode=WriteMode.FORCE)
+    # Read back, so every receipt describes the destination after the last write.
+    return {record_id: session.read_record(path, record_id) for record_id in updated}

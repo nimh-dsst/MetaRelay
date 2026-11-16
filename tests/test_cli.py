@@ -248,3 +248,86 @@ def test_holds_records_without_create_path_is_refused(dest: str, record_file, ca
     assert "--holds-records only applies with --create-path" in capsys.readouterr().err
     assert main(["ls", dest, "Study"]) == 0
     assert capsys.readouterr().out == ""
+
+
+# Edits made in the notebook
+
+
+def _edit_table(dest: str, path: str, record_id: str, old: str, new: str) -> None:
+    md = Path(dest.removeprefix("file://")).joinpath(*path.split("/"), f"{record_id}.md")
+    md.write_text(md.read_text().replace(old, new))
+
+
+def test_a_write_lists_notebook_edits_and_can_accept_them(
+    dest: str, record_file, tmp_path: Path, capsys
+) -> None:
+    receipts = str(tmp_path / "receipts.json")
+
+    def write(file: str, *extra: str) -> int:
+        return main(["write", dest, "Study", file, "--receipts", receipts, *extra])
+
+    main(["mkdir", dest, "Study"])
+    assert write(record_file(400)) == 0
+    _edit_table(dest, "Study", "fiber-1", "| diameter_um | 400.0 |", "| diameter_um | 250 |")
+    capsys.readouterr()
+
+    # Someone made the notebook say 250; this file says 300. Both changed the
+    # same value, so the edit can't simply be accepted, and it isn't offered.
+    update = record_file(300)
+    assert write(update) == 3
+    err = capsys.readouterr().err
+    assert "Changed: Metadata · diameter_um: '400.0' → '250'" in err
+    assert "--accept-edits" not in err
+    assert write(update, "--accept-edits") == 1
+    assert "no longer shows '400.0'" in capsys.readouterr().err
+
+    # The same record as before: the edit can be accepted.
+    same = record_file(400)
+    assert write(same) == 3
+    assert "re-run with --accept-edits" in capsys.readouterr().err
+    assert write(same, "--accept-edits") == 0
+    err = capsys.readouterr().err
+    assert "Accepted from the notebook: fiber-1: Metadata · diameter_um: '400.0' → '250'" in err
+    assert main(["read", dest, "Study", "fiber-1"]) == 0
+    assert json.loads(capsys.readouterr().out)["payload"] == {"diameter_um": 250.0}
+    # The file has the edit too, so writing it again keeps it.
+    assert json.loads(Path(same).read_text())["payload"] == {"diameter_um": 250.0}
+    assert write(same) == 0
+    assert main(["read", dest, "Study", "fiber-1"]) == 0
+    assert json.loads(capsys.readouterr().out)["payload"] == {"diameter_um": 250.0}
+
+
+def test_accept_edits_from_standard_input_prints_the_edited_record(
+    dest: str, record_file, tmp_path: Path, capsys, monkeypatch
+) -> None:
+    import io
+
+    receipts = str(tmp_path / "receipts.json")
+    main(["mkdir", dest, "Study"])
+    assert main(["write", dest, "Study", record_file(400), "--receipts", receipts]) == 0
+    _edit_table(dest, "Study", "fiber-1", "| 400.0 |", "| 250 |")
+    capsys.readouterr()
+    data = Path(record_file(400)).read_bytes()
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(data)))
+    assert main(["write", dest, "Study", "-", "--receipts", receipts, "--accept-edits"]) == 0
+    assert json.loads(capsys.readouterr().out)["payload"] == {"diameter_um": 250.0}
+
+
+def test_accept_edits_refuses_changes_it_cant_list(
+    dest: str, record_file, tmp_path, capsys
+) -> None:
+    receipts = str(tmp_path / "receipts.json")
+    main(["mkdir", dest, "Study"])
+    assert main(["write", dest, "Study", record_file(), "--receipts", receipts]) == 0
+    _edit_table(dest, "Study", "fiber-1", "| Value |", "| Value |\nThe fiber broke.")
+    capsys.readouterr()
+    args = ["write", dest, "Study", record_file(), "--receipts", receipts, "--accept-edits"]
+    assert main(args) == 3
+    err = capsys.readouterr().err
+    assert "MetaRelay can't list" in err
+    assert "--mode force" in err
+
+
+def test_accept_edits_is_for_upsert_only(dest: str, record_file) -> None:
+    with pytest.raises(SystemExit):
+        main(["write", dest, "Study", record_file(), "--mode", "force", "--accept-edits"])

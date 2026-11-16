@@ -4,9 +4,11 @@ import pytest
 from metarelay import Heading, Preview, Record, Table, register_renderer, render_preview
 from metarelay.core import preview as preview_module
 from metarelay.core.checksum import preview_checksum
+from metarelay.core.errors import ValidationError
 from metarelay.core.preview import (
     PreviewDiff,
     PreviewEdit,
+    apply_edits,
     diff_blocks,
     format_value,
     generic_blocks,
@@ -331,3 +333,222 @@ def test_long_values_are_cut_short_in_messages() -> None:
     edit = PreviewEdit(record_id="r", table=None, field="notes", written="a", current="x" * 500)
     assert len(edit.describe()) < 100
     assert edit.describe().endswith("…'")
+
+
+# Accepting edits into the record
+
+
+@pytest.fixture
+def free(isolated_registry):
+    class Free(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(extra="allow")
+
+    class Checked(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(extra="forbid")
+
+        diameter_um: float = pydantic.Field(gt=0)
+
+    isolated_registry.register("test.free", 1, Free)
+    isolated_registry.register("test.checked", 1, Checked)
+
+
+def _accepted(record: Record, *changes: tuple[str, str, str]) -> Record:
+    """Edit rows in the record's Markdown preview, read the diff, and apply it."""
+    text = render_preview(record).markdown
+    for table, field, value in changes:
+        rows = dict(
+            next(
+                b for b in render_preview(record).blocks if getattr(b, "title", None) == table
+            ).rows
+        )
+        text = text.replace(f"| {field} | {rows[field]} |", f"| {field} | {value} |")
+    diff = preview_diff(record, text, format="markdown")
+    assert diff.complete and len(diff.edits) == len(changes)
+    return apply_edits(record, diff.edits)
+
+
+def test_apply_edits_puts_values_back_with_their_types(nested_record: Record) -> None:
+    updated = _accepted(
+        nested_record,
+        ("Context", "cohort", "B"),
+        ("Context", "notes", "moved cage"),
+        ("Metadata", "fiber.diameter_um", "200"),
+        ("Metadata", "sites[0].region", "VTA"),
+        ("Metadata", "indicators", "GCaMP8s, tdTomato"),
+        ("Metadata", "bilateral", "Yes"),
+    )
+    assert updated.context == {"cohort": "B", "subject_id": "M1", "notes": "moved cage"}
+    assert updated.payload["fiber"] == {"diameter_um": 200, "model": "MFC_400"}
+    assert updated.payload["sites"] == [{"region": "VTA", "hemisphere": "left"}]
+    assert updated.payload["indicators"] == ["GCaMP8s", "tdTomato"]
+    assert updated.payload["bilateral"] is True
+    assert updated.updated_at > nested_record.updated_at
+    # The JSON and the preview agree again.
+    assert preview_diff(updated, render_preview(updated).markdown, format="markdown").edits == []
+
+
+def test_apply_edits_reads_empty_and_decimal_values(free) -> None:
+    record = Record(
+        schema_id="test.free",
+        schema_version=1,
+        record_id="r",
+        context={"cohort": "A"},
+        payload={"count": 3, "na": 0.39, "note": "x"},
+    )
+    updated = _accepted(
+        record,
+        ("Context", "cohort", "—"),
+        ("Metadata", "count", "3.5"),
+        ("Metadata", "na", "0.5"),
+        ("Metadata", "note", "—"),
+    )
+    assert updated.context == {"cohort": None}
+    assert updated.payload == {"count": 3.5, "na": 0.5, "note": ""}
+
+
+def test_the_schema_checks_the_result(free) -> None:
+    record = Record(
+        schema_id="test.checked", schema_version=1, record_id="r", payload={"diameter_um": 4}
+    )
+    with pytest.raises(ValidationError, match="not valid"):
+        _accepted(record, ("Metadata", "diameter_um", "-1"))
+
+
+def _edit(field: str, written: str | None, current: str | None, **overrides) -> PreviewEdit:
+    values = {"record_id": "implant-M1", "table": "Metadata", "field": field}
+    return PreviewEdit(**{**values, **overrides}, written=written, current=current)
+
+
+@pytest.mark.parametrize(
+    ("edit", "reason"),
+    [
+        (_edit("fiber.model", "MFC_400", "x", record_id="other"), "is for record 'other'"),
+        (_edit("new", None, "x"), "adding or removing"),
+        (_edit("fiber.model", "MFC_400", None), "adding or removing"),
+        (_edit("fiber.model", "MFC_200", "x"), "no longer shows"),
+        (_edit("fiber.diameter_um", "400", "wide"), "isn't a number"),
+        (_edit("bilateral", "No", "maybe"), "isn't Yes or No"),
+        (_edit("extras", "—", "x"), "empty group"),
+        (_edit("cohort", "A", "B", table="Animal"), "no longer shows"),
+    ],
+)
+def test_edits_that_cant_be_applied_change_nothing(nested_record, edit, reason) -> None:
+    fine = _edit("fiber.model", "MFC_400", "MFC_200")
+    with pytest.raises(ValidationError, match=reason) as raised:
+        apply_edits(nested_record, [fine, edit])
+    assert "none were" in str(raised.value)
+    assert nested_record.payload["fiber"]["model"] == "MFC_400"
+
+
+def test_a_list_with_commas_in_its_items_cant_be_split(free) -> None:
+    record = Record(
+        schema_id="test.free", schema_version=1, record_id="r", payload={"tags": ["a, b"]}
+    )
+    with pytest.raises(ValidationError, match="can't be split"):
+        apply_edits(record, [_edit("tags", "a, b", "a, c", record_id="r")])
+
+
+def test_a_key_the_path_cant_name_is_refused(free) -> None:
+    # "a.b" as one key renders as row "a.b", which also reads as a nested path.
+    record = Record(schema_id="test.free", schema_version=1, record_id="r", payload={"a.b": 1})
+    with pytest.raises(ValidationError, match="none were"):
+        apply_edits(record, [_edit("a.b", "1", "2", record_id="r")])
+
+
+def test_a_custom_preview_cant_be_mapped_back(nested_record: Record) -> None:
+    register_renderer("test.free", lambda record: [Table(title="Mine", rows=[("x", "1")])])
+    with pytest.raises(ValidationError, match="its own preview"):
+        apply_edits(nested_record, [_edit("x", "1", "2", table="Mine")])
+
+
+def test_typed_yes_and_numbers_read_as_shown(nested_record: Record) -> None:
+    updated = _accepted(nested_record, ("Metadata", "bilateral", "yes"))
+    assert updated.payload["bilateral"] is True
+    updated = _accepted(nested_record, ("Metadata", "bilateral", "TRUE"))
+    assert updated.payload["bilateral"] is True
+
+
+def test_a_schema_that_rewrites_the_value_is_refused(isolated_registry) -> None:
+    # The person typed "vta"; the schema stores "VTA". The record would not
+    # say what they accepted, so nothing is applied.
+    class Upper(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(extra="forbid")
+
+        target: str
+
+        @pydantic.field_validator("target")
+        @classmethod
+        def _upper(cls, value: str) -> str:
+            return value.upper()
+
+    isolated_registry.register("test.upper", 1, Upper)
+    record = Record(
+        schema_id="test.upper", schema_version=1, record_id="r", payload={"target": "NAC"}
+    )
+    with pytest.raises(ValidationError, match="would show 'VTA' instead"):
+        _accepted(record, ("Metadata", "target", "vta"))
+
+
+def test_a_filled_in_empty_value_is_converted_by_the_schema(isolated_registry) -> None:
+    class Optional_(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(extra="forbid")
+
+        core_um: float | None = None
+        bilateral: bool | None = None
+
+    isolated_registry.register("test.optional", 1, Optional_)
+    record = Record(
+        schema_id="test.optional",
+        schema_version=1,
+        record_id="r",
+        payload={"core_um": None, "bilateral": None},
+    )
+    updated = _accepted(record, ("Metadata", "core_um", "200"), ("Metadata", "bilateral", "yes"))
+    assert updated.payload == {"core_um": 200.0, "bilateral": True}
+
+
+def test_raw_field_values_are_read_like_the_preview(free) -> None:
+    # eLabFTW's fields give raw text: spaces aren't collapsed, and a cleared
+    # field is "" rather than "—".
+    record = Record(
+        schema_id="test.free",
+        schema_version=1,
+        record_id="r",
+        context={"cohort": "A"},
+        payload={"note": "two  spaces", "count": 3, "tags": ["a", "b"]},
+    )
+    edits = [
+        _edit("note", "two  spaces", "one", record_id="r"),
+        _edit("count", "3", "", record_id="r"),
+        _edit("tags", "a, b", "", record_id="r"),
+        _edit("cohort", "A", "", record_id="r", table="Context"),
+    ]
+    updated = apply_edits(record, edits)
+    assert updated.payload == {"note": "one", "count": None, "tags": []}
+    assert updated.context == {"cohort": None}
+
+
+def test_a_row_shown_twice_is_refused(free) -> None:
+    record = Record(
+        schema_id="test.free", schema_version=1, record_id="r", payload={"a.b": 1, "a": {"b": 2}}
+    )
+    with pytest.raises(ValidationError, match="two rows have that name"):
+        apply_edits(record, [_edit("a.b", "1", "3", record_id="r")])
+
+
+def test_edits_validate_against_the_given_registry() -> None:
+    from metarelay.core.registry import SchemaRegistry
+
+    class Own(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(extra="forbid")
+
+        size: float
+
+    mine = SchemaRegistry()
+    mine.register("test.own", 1, Own)
+    data = {"schema_id": "test.own", "schema_version": 1, "record_id": "r", "payload": {"size": 1}}
+    record = Record.model_validate(data, context={"registry": mine})
+    edit = _edit("size", "1.0", "2", record_id="r")
+    with pytest.raises(ValidationError):
+        apply_edits(record, [edit])  # the default registry doesn't know test.own
+    assert apply_edits(record, [edit], registry=mine).payload == {"size": 2.0}

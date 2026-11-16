@@ -26,21 +26,27 @@ changed, so the person can decide whether to keep it: it renders the record
 MetaRelay last wrote, reads both that and the current preview back into
 blocks with the same parser (``parse_markdown`` or ``parse_html``), and
 compares them row by row. The JSON stays the source of truth: nothing here
-changes a record.
+changes a record by itself. When a person accepts the edits, ``apply_edits``
+copies them into the record, so the JSON and the preview agree again.
 """
 
 from __future__ import annotations
 
+import copy
+import re
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from datetime import datetime
 from html import escape, unescape
 from html.parser import HTMLParser
 from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
+from metarelay.core.errors import ValidationError
 from metarelay.core.model import MetaRelayModel
 from metarelay.core.record import Record
+from metarelay.core.registry import SchemaRegistry
 
 __all__ = [
     "Block",
@@ -50,6 +56,7 @@ __all__ = [
     "PreviewEdit",
     "Renderer",
     "Table",
+    "apply_edits",
     "best_effort",
     "diff_blocks",
     "generic_blocks",
@@ -502,3 +509,174 @@ class _PreviewHTML(HTMLParser):
         super().close()
         if self._title is not None or self._table is not None:
             self.clean = False
+
+
+# Accepting edits into the record
+
+_PATH_PART = re.compile(r"\[(\d+)\]|([^.\[\]]+)")
+
+
+def apply_edits(
+    record: Record,
+    edits: Sequence[PreviewEdit],
+    *,
+    registry: SchemaRegistry | None = None,
+) -> Record:
+    """Copy edits a person accepted from the preview into ``record``.
+
+    Each edit's new value goes back where the generic renderer showed it: a
+    ``Context`` row into ``context``, a ``Metadata`` row (``fiber.core_um``,
+    ``sites[0].region``) into ``payload``, converted to the type of the value
+    it replaces ("200" for a number, "Yes"/"No" for a yes/no value, "a, b"
+    for a list). A value that was empty stays text, and the schema converts
+    it (a number field takes "200"). The result is validated like any record,
+    against ``registry`` if given, and must show the accepted values in its
+    preview.
+
+    All or nothing: if any edit can't be applied, nothing is. To accept the
+    edits in a ``ConflictError`` and write them, use ``accept_edits``, which
+    also handles the other records of an eLabFTW entry.
+
+    Raises:
+        ValidationError: If an edit is for another record, adds or removes a
+            row, no longer matches the record (it changed since), names a row
+            shown twice, can't be converted, or the schema rejects the
+            result. Also for records with their own renderer, whose rows
+            MetaRelay can't map back.
+    """
+    if record.schema_id in _renderers:
+        raise ValidationError(
+            f"Edits to {record.record_id!r} can't be applied automatically: its schema "
+            f"{record.schema_id!r} has its own preview, whose rows MetaRelay can't map "
+            "back to the record. Copy them into the record by hand."
+        )
+    shown = _rows(generic_blocks(record))
+    context = dict(record.context)
+    payload = copy.deepcopy(record.payload)
+    problems: list[str] = []
+    for edit in edits:
+        where = edit.describe()
+        if edit.record_id != record.record_id:
+            problems.append(f"{where}: it is for record {edit.record_id!r}")
+            continue
+        if edit.written is None or edit.current is None:
+            problems.append(f"{where}: adding or removing a row isn't supported")
+            continue
+        if (edit.table, edit.field, 1) in shown:
+            problems.append(f"{where}: two rows have that name, so MetaRelay can't tell which")
+            continue
+        now = shown.get((edit.table, edit.field, 0))
+        if now is None or _squash(now) != _typed(edit.written):
+            problems.append(f"{where}: the record no longer shows {_short(edit.written)} there")
+            continue
+        current = _typed(edit.current)
+        try:
+            if edit.table == "Context":
+                context[edit.field] = None if current == EMPTY else current
+            elif edit.table == "Metadata":
+                _set_shown_value(payload, edit.field, current)
+            else:
+                raise ValueError("it isn't in a table MetaRelay can map back")
+        except (ValueError, LookupError, TypeError) as error:
+            problems.append(f"{where}: {error}")
+    if not problems:
+        data = {
+            **record.model_dump(),
+            "context": context,
+            "payload": payload,
+            "updated_at": datetime.now().astimezone(),
+        }
+        try:
+            if registry is None:
+                updated = Record.model_validate(data)
+            else:
+                updated = Record.model_validate(data, context={"registry": registry})
+        except ValidationError as error:
+            message = f"The edited {record.record_id!r} is not valid: {error}"
+            raise ValidationError(message) from None
+        after = _rows(generic_blocks(updated))
+        problems = [
+            f"{edit.describe()}: the record would show "
+            f"{_short(after.get((edit.table, edit.field, 0)))} instead"
+            for edit in edits
+            if not _same_shown(after.get((edit.table, edit.field, 0)), edit.current)
+        ]
+    if problems:
+        raise ValidationError(
+            f"Can't apply the edits to {record.record_id!r}, so none were: " + "; ".join(problems)
+        )
+    return updated
+
+
+_ANSWERS = {"yes": True, "true": True, "no": False, "false": False}
+"""What a person may type for a yes/no value. The preview shows Yes or No."""
+
+
+def _typed(text: str) -> str:
+    """A value as typed, the way the preview shows it: blank is EMPTY.
+
+    Values read from Markdown or HTML already look like this. eLabFTW's
+    fields give the raw text, where a cleared field is "".
+    """
+    return _squash(text) or EMPTY
+
+
+def _answer(text: str) -> bool | None:
+    return _ANSWERS.get(text.strip().lower())
+
+
+def _same_shown(shown: str | None, typed: str | None) -> bool:
+    """Whether the preview shows what the person typed (``250`` reads as ``250.0``)."""
+    if shown is None or typed is None:
+        return shown is typed
+    shown, typed = _squash(shown), _typed(typed)
+    if shown == typed:
+        return True
+    if _answer(shown) is not None and _answer(typed) is not None:
+        return _answer(shown) == _answer(typed)
+    try:
+        return float(shown) == float(typed)
+    except ValueError:
+        return False
+
+
+def _set_shown_value(payload: dict[str, Any], field: str, text: str) -> None:
+    """Set the payload value shown as row ``field`` from its shown ``text``."""
+    parts = [int(index) if index else key for index, key in _PATH_PART.findall(field)]
+    if not parts:
+        raise ValueError("it doesn't name a payload value")
+    parent: Any = payload
+    for part in parts[:-1]:
+        parent = parent[part]
+    last = parts[-1]
+    parent[last] = _from_shown(parent[last], text)
+
+
+def _from_shown(old: Any, text: str) -> Any:
+    """Turn ``text``, as a person typed it in a table cell, into a value like ``old``."""
+    if isinstance(old, Mapping):
+        raise ValueError("an empty group can't take a value")
+    if text == EMPTY:
+        if isinstance(old, list):
+            return []
+        return "" if isinstance(old, str) else None
+    if isinstance(old, bool):
+        answer = _answer(text)
+        if answer is None:
+            raise ValueError(f"{_short(text)} isn't Yes or No")
+        return answer
+    if isinstance(old, int | float):
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            return float(text)
+        except ValueError:
+            raise ValueError(f"{_short(text)} isn't a number") from None
+    if isinstance(old, list):
+        if any(isinstance(item, str) and ", " in item for item in old):
+            raise ValueError("its list has items containing ', ', so it can't be split")
+        sample = old[0] if old else ""
+        return [_from_shown(sample, item) for item in text.split(", ")]
+    return text

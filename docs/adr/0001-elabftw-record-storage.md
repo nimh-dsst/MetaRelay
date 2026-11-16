@@ -131,8 +131,9 @@ ID, table and row, and whether that list is complete. It is complete when
 putting the listed values back gives exactly the entry MetaRelay saved, so
 an edit to the body or to a field's settings makes it incomplete. The body
 isn't read back: fields are structured, sanitized HTML isn't. MetaRelay
-never takes a value from the fields itself; the caller copies an accepted
-edit into the record. Every backend that keeps previews does the same
+never takes a value from the fields itself: when a person accepts the
+edits, `accept_edits` copies them into every edited record in the entry
+and writes them, since a forced write rebuilds the whole entry. Every backend that keeps previews does the same
 (conformance: `test_preview_edit_says_what_changed`).
 
 ### 4. An adapter isolates `elabapi-python` (R2)

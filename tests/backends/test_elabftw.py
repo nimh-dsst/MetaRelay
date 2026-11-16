@@ -39,6 +39,7 @@ from metarelay.core.errors import (
 )
 from metarelay.core.path import LogicalPath
 from metarelay.core.preview import PreviewDiff, PreviewEdit
+from metarelay.core.receipt import SyncIndex
 from metarelay.core.record import Record
 from metarelay.testing import BackendConformance
 
@@ -356,6 +357,41 @@ def test_a_conflict_lists_edits_to_other_records_in_the_entry(session, page) -> 
         ],
         complete=True,
     )
+
+
+@live
+def test_the_cli_accepts_edits_to_every_record_in_the_entry(
+    session, page, tmp_path, monkeypatch
+) -> None:
+    from metarelay.cli import main
+
+    receipt = session.write_record(page, make("rec-1"))
+    session.write_record(page, make("rec-2", count="3"))
+    entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
+    # A value with doubled spaces, and a field cleared, in another record.
+    for label, value in (("rec-1 · label", "by  hand"), ("rec-2 · count", "")):
+        api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", label: value})
+    file = tmp_path / "rec-1.json"
+    file.write_text(make("rec-1").model_dump_json())
+    receipts = tmp_path / "receipts.json"
+    index = SyncIndex()
+    index.put(receipt)
+    receipts.write_text(index.model_dump_json())
+    monkeypatch.setenv("METARELAY_ELABFTW_TOKEN", TOKEN)
+    monkeypatch.setenv("METARELAY_ELABFTW_API_URL", API_URL)
+
+    args = ["write", uri_for(), str(page), str(file), "--receipts", str(receipts)]
+    assert main([*args, "--accept-edits"]) == 0
+    stored = {s.record.record_id: s.record.payload for s in session.list_records(page)}
+    assert stored["rec-1"]["label"] == "by hand"
+    assert stored["rec-2"]["count"] == ""
+    assert json.loads(file.read_text())["payload"]["label"] == "by hand"
+    # The entry was rebuilt from the edited records, and the saved receipts
+    # describe it: writing either record next goes through.
+    saved = SyncIndex.model_validate_json(receipts.read_text())
+    rec_2 = saved.get(session.destination, page, "rec-2")
+    session.write_record(page, make("rec-2", count="4"), prior_receipt=rec_2)
+    assert main(args) == 0
 
 
 @live

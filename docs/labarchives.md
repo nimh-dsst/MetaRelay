@@ -113,10 +113,12 @@ last write, which the caption stores. Keep the edit by copying it into
 the record, or replace it with `mode="force"`.
 
 The error's `preview_diff` lists the values that changed in the table entry
-([Concepts](concepts.md#write-modes)). LabArchives rewrites the HTML it
+([Concepts](concepts.md#when-someone-edited-the-preview)). LabArchives rewrites the HTML it
 stores, so MetaRelay reads only the text of headings and table cells. That
 is best effort: if LabArchives changes the markup more than that, the list
 may be empty or marked incomplete.
+To keep the edits, `accept_edits` copies them into the record and writes it,
+or run `metarelay write --accept-edits` ([Concepts](concepts.md#when-someone-edited-the-preview)).
 
 ## Developing without a LabArchives account
 

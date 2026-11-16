@@ -13,6 +13,10 @@ the module that registers them (until MetaRelay ships its own schemas).
 
 ``--receipts FILE`` keeps receipts in a JSON file between runs, so updating a
 record you wrote earlier is not reported as a conflict.
+
+If someone edited the record's table in the notebook, ``write`` stops and
+lists what changed. ``--accept-edits`` copies those edits into the record,
+writes it, and updates the JSON file, so the destination and the file keep them.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from metarelay.core.backend import connect
-from metarelay.core.conflict import WriteMode
+from metarelay.core.conflict import WriteMode, accept_edits
 from metarelay.core.errors import (
     ConfigurationError,
     ConflictError,
@@ -36,7 +40,8 @@ from metarelay.core.errors import (
     ValidationError,
 )
 from metarelay.core.path import LogicalPath
-from metarelay.core.receipt import SyncIndex
+from metarelay.core.preview import apply_edits
+from metarelay.core.receipt import Receipt, SyncIndex
 from metarelay.core.record import Record
 from metarelay.core.session import Session
 
@@ -83,6 +88,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_holds_records(write)
     _add_receipts(write)
+    write.add_argument(
+        "--accept-edits",
+        action="store_true",
+        help="if someone edited the record's table in the notebook, copy their edits "
+        "into the record, write it, and update FILE with them (upsert only)",
+    )
 
     read = commands.add_parser("read", help="print a record as JSON")
     _add_location(read, path_required=True)
@@ -124,6 +135,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "write" and args.holds_records and not args.create_path:
         parser.error("--holds-records only applies with --create-path")
+    if args.command == "write" and args.accept_edits and args.mode != WriteMode.UPSERT.value:
+        parser.error("--accept-edits only applies with --mode upsert")
     try:
         _check_receipts_file(getattr(args, "receipts", None))
         for module in args.imports:
@@ -136,8 +149,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConflictError as error:
         print(f"metarelay: conflict: {error}", file=sys.stderr)
         if args.command == "write" and args.mode != WriteMode.FORCE.value:
-            if args.receipts is None and args.mode == WriteMode.UPSERT.value:
+            diff = error.preview_diff
+            if args.receipts is None and args.mode == WriteMode.UPSERT.value and diff is None:
                 print("If you wrote it earlier, pass the same --receipts file.", file=sys.stderr)
+            if getattr(args, "can_accept", False):
+                print("To keep the edits, re-run with --accept-edits.", file=sys.stderr)
             print("To overwrite it anyway, re-run with --mode force.", file=sys.stderr)
         return 3
     except MetaRelayError as error:
@@ -167,12 +183,18 @@ def _run(args: argparse.Namespace, session: Session) -> int:
         if args.create_path:
             session.ensure_container(path, holds_records=args.holds_records)
         before = _state_at_destination(session, path, record.record_id)
-        receipt = session.write_record(
-            path,
-            record,
-            mode=WriteMode(args.mode),
-            prior_receipt=receipts.get(session.destination, path, record.record_id),
-        )
+        prior = receipts.get(session.destination, path, record.record_id)
+        try:
+            receipt = session.write_record(
+                path, record, mode=WriteMode(args.mode), prior_receipt=prior
+            )
+        except ConflictError as error:
+            if not args.accept_edits:
+                args.can_accept = _can_accept(error, record)
+                raise
+            receipt, *others = _accept(args, session, path, record, error)
+            for other in others:
+                receipts.put(other)
         receipts.put(receipt)
         _save_receipts(args.receipts, receipts)
         unchanged = before == (receipt.checksum, receipt.conflict_token, receipt.preview_checksum)
@@ -186,6 +208,48 @@ def _run(args: argparse.Namespace, session: Session) -> int:
     _save_receipts(args.receipts, receipts)
     print(stored.record.model_dump_json(indent=2))
     return 0
+
+
+def _accept(
+    args: argparse.Namespace,
+    session: Session,
+    path: LogicalPath,
+    record: Record,
+    error: ConflictError,
+) -> list[Receipt]:
+    """Keep the notebook edits ``error`` lists, and put them in the input file too.
+
+    Returns the receipts of every record written, ``record``'s first.
+    """
+    diff = error.preview_diff
+    if diff is None:
+        raise error  # not an edit to the preview: nothing to accept
+    written = accept_edits(session, path, record, diff)
+    for edit in diff.edits:
+        print(f"Accepted from the notebook: {edit.record_id}: {edit.describe()}", file=sys.stderr)
+    edited = written[record.record_id].record.model_dump_json(indent=2) + "\n"
+    # The file must hold the edits too: written again unchanged, it would
+    # undo them without a conflict, since the receipt matches.
+    if args.file == "-":
+        print(edited, end="")
+    else:
+        Path(args.file).write_text(edited)
+        print(f"Updated {args.file} with the edits.", file=sys.stderr)
+    for record_id in list(written)[1:]:  # other records in the same eLabFTW entry
+        print(f"Also wrote {record_id} with its edits.", file=sys.stderr)
+    return [stored.receipt for stored in written.values()]
+
+
+def _can_accept(error: ConflictError, record: Record) -> bool:
+    """Whether --accept-edits would work for ``record``'s own edits."""
+    diff = error.preview_diff
+    if diff is None or not diff.complete:
+        return False
+    try:
+        apply_edits(record, [edit for edit in diff.edits if edit.record_id == record.record_id])
+    except ValidationError:
+        return False
+    return True
 
 
 def _state_at_destination(
