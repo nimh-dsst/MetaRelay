@@ -44,6 +44,49 @@ change at the destination, so they are not overwritten silently. That holds
 even if you read the record after the edit: a read returns the JSON, not the
 preview, so its receipt still describes the preview MetaRelay last wrote.
 
+## Handling a conflict
+
+`ConflictError` means someone changed the record at the destination since
+your receipt. MetaRelay never picks a winner. Show the person both versions
+(`read_record` returns theirs), and let them choose:
+
+- **Keep their change:** copy it into your record, then write it with
+  `mode=WriteMode.FORCE`. Your record now holds both.
+- **Keep yours:** write it with `mode=WriteMode.FORCE`.
+
+The [`save_metadata` example](../examples/save_metadata/README.md) writes
+every record this way. It stops on a conflict unless the person already
+chose to replace the change:
+
+<!-- example: save_metadata/save_metadata.py#write-with-receipt -->
+```python
+def write(
+    session: Session,
+    where: LogicalPath,
+    record: Record,
+    receipts: SyncIndex,
+    *,
+    force: bool = False,
+) -> Receipt:
+    """Write ``record`` with the receipt from the last write, and keep the new one.
+
+    Raises:
+        ConflictError: If the record changed at the destination since then,
+            unless ``force`` is set.
+    """
+    prior = receipts.get(session.destination, where, record.record_id)
+    try:
+        receipt = session.write_record(where, record, prior_receipt=prior)
+    except ConflictError:
+        # Someone changed the record at the destination since `prior`.
+        # Stop, unless the person already chose to replace their change.
+        if not force:
+            raise
+        receipt = session.write_record(where, record, mode=WriteMode.FORCE)
+    receipts.put(receipt)
+    return receipt
+```
+
 ## Errors
 
 Every backend raises the same errors, all subclasses of `MetaRelayError`:

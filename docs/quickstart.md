@@ -17,8 +17,10 @@ pip install "git+https://github.com/nimh-dsst/MetaRelay.git"
 Every record follows a registered schema. MetaRelay's own schemas are not
 written yet, so register a small one. Save this as `lab_schemas.py`:
 
+<!-- example: lab_schemas.py#schema -->
 ```python
 import pydantic
+
 from metarelay import register_schema
 
 
@@ -34,17 +36,78 @@ register_schema("lab.implant", 1, Implant)
 
 ## From Python
 
+The code below comes from the
+[`save_metadata` example](../examples/save_metadata/README.md). To run all of
+it at once, from a clone of the repository:
+
+```sh
+mkdir -p metadata
+python -m examples.save_metadata "file://$PWD/metadata"
+```
+
+Connect to a folder, and pick where the record goes:
+
 ```python
 from pathlib import Path
 
 import lab_schemas  # registers lab.implant
-from metarelay import LogicalPath, Record, SyncIndex, connect
+from metarelay import (
+    ConflictError,
+    LogicalPath,
+    Receipt,
+    Record,
+    Session,
+    SyncIndex,
+    WriteMode,
+    connect,
+)
 
 folder = Path("metadata")
 folder.mkdir(exist_ok=True)
 session = connect(folder.resolve().as_uri())  # file:///…/metadata
 
 where = LogicalPath(("Fiber study", "Cohort A"))
+receipts = SyncIndex()  # save it with your data: see below
+force = False  # True only after the person chose to replace a change made elsewhere
+```
+
+Every write returns a receipt. Keep it, and pass it to the next write of the
+same record: it lets MetaRelay tell your own earlier write apart from
+someone else's change. The example wraps that in one function:
+
+<!-- example: save_metadata/save_metadata.py#write-with-receipt -->
+```python
+def write(
+    session: Session,
+    where: LogicalPath,
+    record: Record,
+    receipts: SyncIndex,
+    *,
+    force: bool = False,
+) -> Receipt:
+    """Write ``record`` with the receipt from the last write, and keep the new one.
+
+    Raises:
+        ConflictError: If the record changed at the destination since then,
+            unless ``force`` is set.
+    """
+    prior = receipts.get(session.destination, where, record.record_id)
+    try:
+        receipt = session.write_record(where, record, prior_receipt=prior)
+    except ConflictError:
+        # Someone changed the record at the destination since `prior`.
+        # Stop, unless the person already chose to replace their change.
+        if not force:
+            raise
+        receipt = session.write_record(where, record, mode=WriteMode.FORCE)
+    receipts.put(receipt)
+    return receipt
+```
+
+Write a record and read it back:
+
+<!-- example: save_metadata/save_metadata.py#write-and-read -->
+```python
 session.ensure_container(where)
 
 record = Record(
@@ -54,28 +117,33 @@ record = Record(
     context={"cohort": "A", "subject_id": "M1"},
     payload={"fiber_diameter_um": 400, "target_region": "VTA"},
 )
-receipt = session.write_record(where, record)
+written = write(session, where, record, receipts, force=force)
 
 stored = session.read_record(where, "implant-M1")
-print(stored.record.payload)  # {'fiber_diameter_um': 400.0, 'target_region': 'VTA'}
+# stored.record.payload == {"fiber_diameter_um": 400.0, "target_region": "VTA"}
 ```
 
-Keep the receipt. It lets the next write tell your own earlier write apart
-from someone else's change:
+Records are frozen. To change one, validate a new one and write it. The
+receipt from the first write makes this an update, not a conflict:
 
+<!-- example: save_metadata/save_metadata.py#update -->
 ```python
-receipts = SyncIndex()
-receipts.put(receipt)
-
 changed = Record.model_validate(
     {**record.model_dump(), "payload": {"fiber_diameter_um": 200, "target_region": "VTA"}}
 )
-prior = receipts.get(session.destination, where, "implant-M1")
-receipts.put(session.write_record(where, changed, prior_receipt=prior))
+updated = write(session, where, changed, receipts)
 ```
 
-Without `prior_receipt`, the second write raises `ConflictError`, because
-MetaRelay can't tell whether the record at the destination is yours.
+Without the receipt, the second write raises `ConflictError`, because
+MetaRelay can't tell whether the record at the destination is yours. So save
+the receipts between runs. A `SyncIndex` is plain data:
+
+```python
+Path("receipts.json").write_text(receipts.model_dump_json())
+receipts = SyncIndex.model_validate_json(Path("receipts.json").read_text())
+```
+
+[Concepts](concepts.md#write-modes) covers what to do on a conflict.
 
 ## What's on disk
 
