@@ -224,8 +224,11 @@ class PreviewEdit(MetaRelayModel):
     current: str | None
     """The value in the notebook now, or ``None`` if the row was removed."""
 
-    def describe(self) -> str:
+    def describe(self, *, name_record: bool = False) -> str:
+        """The change, for a message. ``name_record`` says which record it's in."""
         where = f"{self.table} · {self.field}" if self.table else self.field
+        if name_record:
+            where += f" of {self.record_id}"
         if self.written is None:
             return f"{where}: added {_short(self.current)}"
         if self.current is None:
@@ -249,13 +252,21 @@ class PreviewDiff(MetaRelayModel):
     when something else changed that MetaRelay can't list, such as text added
     between the tables or a table renamed."""
 
-    def describe(self, limit: int = 5) -> str:
-        """A sentence for an error message."""
+    def describe(self, limit: int = 5, *, writing: str | None = None) -> str:
+        """A sentence for an error message.
+
+        ``writing`` is the ID of the record being written. Edits to other
+        records (in an eLabFTW entry that holds several) name their record,
+        so the message doesn't read as a change to the one being written.
+        """
         if not self.edits:
             if self.complete:
                 return "Only formatting changed, no values."
             return "MetaRelay can't tell what changed."
-        listed = "; ".join(edit.describe() for edit in self.edits[:limit])
+        listed = "; ".join(
+            edit.describe(name_record=writing is not None and edit.record_id != writing)
+            for edit in self.edits[:limit]
+        )
         more = len(self.edits) - limit
         text = f"Changed: {listed}" + (f"; and {more} more" if more > 0 else "") + "."
         if not self.complete:

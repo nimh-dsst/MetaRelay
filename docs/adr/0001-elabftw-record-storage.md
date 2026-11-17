@@ -125,12 +125,15 @@ other records' sections. The error message says so.
 
 **The conflict says what changed.** DSST asked for MetaRelay to read hand
 edits, while keeping D7 (nothing changes without someone approving it). So
-the `ConflictError` carries a `PreviewDiff`: each field whose value differs
-from what MetaRelay wrote (rebuilt from the stored records), with its record
-ID, table and row, and whether that list is complete. It is complete when
-putting the listed values back gives exactly the entry MetaRelay saved, so
-an edit to the body or to a field's settings makes it incomplete. The body
-isn't read back: fields are structured, sanitized HTML isn't. MetaRelay
+the `ConflictError` carries a `PreviewDiff`: each value that differs from
+what MetaRelay wrote (rebuilt from the stored records), in a field or in the
+body's tables, with its record ID, table and row, and whether that list is
+complete. Fields are compared exactly. The body is compared by its text, as
+on LabArchives, because the editor rewrites the HTML (it adds styles and
+wraps cells in `<p>`), and the body is where people naturally edit. It is
+complete when nothing else changed: the fields match once the listed values
+are put back, the body has the same headings and tables with nothing added,
+and the body and fields agree. MetaRelay
 never takes a value from the fields itself: when a person accepts the
 edits, `accept_edits` copies them into every edited record in the entry
 and writes them, since a forced write rebuilds the whole entry. Every backend that keeps previews does the same
@@ -171,7 +174,8 @@ parameter, 5.3.0 has a different `patch_experiment`). CI also tests 6.0.0.
   paths still work; their deepest prefixes just have no tag.
 - **`extra_fields` flatten nested values.** Labels carry the record ID. The
   JSON in `metadata.metarelay` keeps the real structure.
-- **A hand edit to a field is reported, not used.** The conflict lists the
-  old and new values; MetaRelay never writes a value from `extra_fields` or
-  the body into a record. Edits to the body's tables are detected but not
-  listed.
+- **A hand edit is reported, not used, until someone accepts it.** The
+  conflict lists the old and new values from the fields and the body's
+  tables; MetaRelay copies them into a record only through `accept_edits`.
+  Body edits outside the tables (notes, renamed headings) are detected but
+  can't be listed, so they can't be accepted.
