@@ -16,6 +16,8 @@ from metarelay.testing.labarchives_fake import FakeLabArchives, serve_fake
 
 labapi = pytest.importorskip("labapi")
 
+from metarelay.backends.labarchives import _error_code  # noqa: E402  needs labapi
+
 AKID, AKPASS = "test-akid", "test-akpass"
 
 
@@ -56,15 +58,21 @@ def test_login_returns_the_users_notebooks(user) -> None:
     assert [notebook.name for notebook in user.notebooks.all_values()] == ["Lab Notebook"]
 
 
+# labapi before 1.2.0 doesn't find an error code inside the class root, and
+# raises ApiError for every failure. So these check the code, as the backend does.
+
+
 def test_wrong_auth_code_is_an_authentication_error(client) -> None:
-    with pytest.raises(labapi.AuthenticationError):
+    with pytest.raises((labapi.AuthenticationError, labapi.ApiError)) as caught:
         client.login("ada@example.org", "wrong")
+    assert _error_code(caught.value)[0] == 4514
 
 
 def test_bad_signature_is_an_authentication_error(base_url: str) -> None:
     client = labapi.Client(base_url, AKID, "wrong-password")
-    with pytest.raises(labapi.AuthenticationError):
+    with pytest.raises((labapi.AuthenticationError, labapi.ApiError)) as caught:
         client.login("ada@example.org", "code-1")
+    assert _error_code(caught.value)[0] == 4520
 
 
 def test_signature_check_can_be_turned_off(fake: FakeLabArchives) -> None:
@@ -260,7 +268,7 @@ def test_an_id_that_names_nothing_is_error_4999_inside_the_class_root(
             nbid=user.notebooks["Lab Notebook"].id,
             parent_tree_id="999999999",
         )
-    assert caught.value.error_code == 4999
+    assert _error_code(caught.value)[0] == 4999
 
     fake.verify_signatures = False
     status, _, body = fake.handle(

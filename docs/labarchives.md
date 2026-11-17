@@ -103,6 +103,11 @@ contained bad information"), which is what LabArchives answers for an ID that
 names nothing. It is a general code, so MetaRelay does not read it as "not
 found". MetaRelay finds things by name and raises `NotFoundError` itself.
 
+LabArchives puts an error inside the API class's root element
+(`<tree-tools><error>...`). `labapi` before 1.2.0 doesn't look there, so
+MetaRelay reads the code itself and the errors above are the same on every
+supported `labapi` version.
+
 ## Edits made in LabArchives
 
 The JSON attachment is the source of truth. If someone changes it, or edits

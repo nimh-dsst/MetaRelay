@@ -50,8 +50,10 @@ import pydantic
 import requests
 
 from metarelay.backends.labarchives import (
+    _AUTH_CODES,
     RECORDS_PAGE,
     LabArchivesSession,
+    _error_code,
     _labarchives_errors,
     _marker,
 )
@@ -244,10 +246,11 @@ def _probe_missing_folder(session: Session, notebook_id: str | None, say) -> Non
     user = session._user  # the labapi user behind the session
     try:
         user.api_get("tree_tools/get_tree_level", nbid=notebook_id, parent_tree_id=MISSING_TREE_ID)
-    except labapi.AuthenticationError:
-        raise SmokeFailure("LabArchives rejected the credentials during the probe.") from None
-    except labapi.ApiError as error:
-        say(f"info LabArchives answers a missing folder with error code {error.error_code}")
+    except (labapi.AuthenticationError, labapi.ApiError) as error:
+        code, _ = _error_code(error)  # also reads a code that an older labapi missed
+        if isinstance(error, labapi.AuthenticationError) or code in _AUTH_CODES:
+            raise SmokeFailure("LabArchives rejected the credentials during the probe.") from None
+        say(f"info LabArchives answers a missing folder with error code {code}")
     except (labapi.LabArchivesError, requests.RequestException) as error:
         # Never print the error itself: a requests error carries the signed URL.
         raise SmokeFailure(f"The missing-folder probe failed ({type(error).__name__}).") from None
