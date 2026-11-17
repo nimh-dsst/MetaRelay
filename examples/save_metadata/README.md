@@ -93,6 +93,28 @@ For real LabArchives, set the institution's key pair, drop
 then paste the address your browser was sent back to. That page may not
 load, which is expected: only its address matters.
 
+## Run it against eLabFTW
+
+Install the extra, start the dev stack's eLabFTW, and seed its API key (no
+account):
+
+```sh
+uv sync --extra elabftw
+docker compose up -d --wait elabftw
+docker compose exec elabftw bin/init db:populate /seed/populate.yml --yes --fast
+export METARELAY_ELABFTW_TOKEN=metarelay-dev-key
+export METARELAY_ELABFTW_API_URL=http://localhost:3148/api/v2
+uv run python -m examples.save_metadata elabftw://localhost:3148/experiments
+```
+
+eLabFTW has no folders, so `Fiber study` and `Cohort A` each become an
+entry, and the record goes in the `Cohort A` entry. Use `/resources` instead
+of `/experiments` to write resources. Then open the record with the
+[`open_elabftw_experiment` example](../open_elabftw_experiment/README.md).
+
+For a real eLabFTW, set `METARELAY_ELABFTW_TOKEN` to your API key, drop
+`METARELAY_ELABFTW_API_URL`, and use `elabftw://<your host>/experiments`.
+
 ## Run it against GitHub
 
 Install the extra, and start the fake GitHub API in another terminal (no

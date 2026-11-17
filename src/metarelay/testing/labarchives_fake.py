@@ -15,7 +15,8 @@ What it does:
   a successful login;
 - checks the HMAC ``sig`` on every call (turn off with ``verify_signatures``);
 - answers errors the way LabArchives does: a non-200 status with an
-  ``<error-code>`` body, which ``labapi`` turns into its own exceptions.
+  ``<error-code>`` inside the API class's root element (for example
+  ``<tree-tools><error>...``), which ``labapi`` turns into its own exceptions.
 
 Use it in tests::
 
@@ -69,8 +70,14 @@ INVALID_AKID = 4506
 BAD_LOGIN = 4514
 BAD_SIGNATURE = 4520
 SESSION_EXPIRED = 4533
-# Codes for everything else. LabArchives' own numbers for these are not
-# documented; captured responses should replace them.
+# What LabArchives answers, with status 400, when an ID in the request names
+# nothing. Captured from real LabArchives (tests/cassettes/labarchives) for a
+# missing folder in tree_tools/get_tree_level; the fake uses it for every ID
+# that names nothing. It is a general code, not a not-found code.
+BAD_INFORMATION = 4999
+BAD_INFORMATION_TEXT = "your request contained bad information"
+# Placeholders. LabArchives' own answers for an unknown API method and for a
+# missing parameter are not documented; captured responses should replace them.
 NOT_FOUND = 4404
 BAD_REQUEST = 4400
 # Documented by labapi: the signed-in account is not the notebook's owner.
@@ -88,7 +95,13 @@ class FakeLabArchivesError(Exception):
 
 
 def _not_found(what: str) -> FakeLabArchivesError:
+    """An address the fake doesn't serve: an unknown path or API method."""
     return FakeLabArchivesError(NOT_FOUND, f"{what} not found", HTTPStatus.NOT_FOUND)
+
+
+def _bad_id() -> FakeLabArchivesError:
+    """An ID that names nothing. LabArchives doesn't say which ID, so neither does the fake."""
+    return FakeLabArchivesError(BAD_INFORMATION, BAD_INFORMATION_TEXT, HTTPStatus.BAD_REQUEST)
 
 
 @dataclass
@@ -182,7 +195,7 @@ class FakeLabArchives:
             if parent_id != ROOT_TREE_ID:
                 parent = self._nodes.get(parent_id)
                 if parent is None or parent.notebook_id != notebook_id or parent.is_page:
-                    raise _not_found(f"Folder {parent_id}")
+                    raise _bad_id()
             tree_id = f"{notebook_id}_{next(self._ids)}"
             self._nodes[tree_id] = _Node(tree_id, notebook_id, parent_id, name, is_page)
             return tree_id
@@ -305,6 +318,7 @@ class FakeLabArchives:
         self, http_method: str, path: str, query: Mapping[str, str], body: bytes, content_type: str
     ) -> tuple[HTTPStatus, dict[str, str], bytes]:
         """Answer one HTTP request. Returns status, headers, and body."""
+        root = ""
         try:
             if path.rstrip("/").endswith("/api_user_login"):
                 return self._login_page(query)
@@ -312,6 +326,8 @@ class FakeLabArchives:
             if len(parts) < 3 or parts[-3] != "api":
                 raise _not_found(f"Path {path}")
             api_class, method = parts[-2], parts[-1]
+            # LabArchives puts an error inside the class's root, as it does a result.
+            root = api_class.replace("_", "-")
             self._check_signature(query, method)
             with self._lock:
                 self.calls.append((api_class, method))
@@ -325,9 +341,11 @@ class FakeLabArchives:
                 return self._dispatch(api_class, method, query, form, body)
         except FakeLabArchivesError as error:
             xml = (
-                f"<error><error-code>{error.code}</error-code>"
+                f'<error><error-code type="integer">{error.code}</error-code>'
                 f"<error-description>{escape(error.description)}</error-description></error>"
             )
+            if root:
+                xml = f"<{root}>{xml}</{root}>"
             return error.status, {"Content-Type": "application/xml"}, xml.encode()
 
     def _saved_text(self, html: str) -> str:
@@ -399,7 +417,7 @@ class FakeLabArchives:
                 entry = self._owned_entry(user, query.get("eid", ""))
                 entry.data = self._saved_text(form.get("entry_data", ""))
                 entry.version += 1
-                return _xml(_entry_xml(entry))
+                return _xml(_entry_xml(entry, wrap="entries", data=False))
             case "entries", "add_attachment":
                 return _xml(self._add_attachment(user, query, body))
             case "entries", "update_attachment":
@@ -409,11 +427,11 @@ class FakeLabArchives:
                 entry.data = query.get("caption", "")
                 entry.content = body
                 entry.version += 1
-                return _xml(_entry_xml(entry))
+                return _xml(_entry_xml(entry, wrap="entries", data=False))
             case "entries", "entry_attachment":
                 entry = self._owned_entry(user, query.get("eid", ""))
                 if entry.part_type != "Attachment":
-                    raise _not_found(f"Attachment {entry.eid}")
+                    raise _bad_id()
                 filename = entry.filename.replace('"', "")
                 headers = {
                     "Content-Type": entry.content_type,
@@ -467,7 +485,7 @@ class FakeLabArchives:
         nbid = self._notebook(user, query.get("nbid", ""))
         node = self._nodes.get(query.get("tree_id", ""))
         if node is None or node.notebook_id != nbid:
-            raise _not_found(f"Node {query.get('tree_id')}")
+            raise _bad_id()
         if query.get("display_text"):
             node.name = query["display_text"]
         if query.get("parent_tree_id"):
@@ -492,7 +510,7 @@ class FakeLabArchives:
         if part_type == "text entry":
             data = self._saved_text(data)
         self._entries[eid] = _Entry(eid, page.tree_id, part_type, data)
-        return _entry_xml(self._entries[eid], wrap="entries")
+        return _entry_xml(self._entries[eid], wrap="entries", data=False)
 
     def _add_attachment(self, user: _User, query: Mapping[str, str], body: bytes) -> str:
         page = self._owned_page(user, query.get("pid", ""))
@@ -502,7 +520,7 @@ class FakeLabArchives:
         if len(body) > self.max_file_size:
             raise FakeLabArchivesError(BAD_REQUEST, "File too large", HTTPStatus(413))
         eid = self.add_attachment(page.tree_id, filename, body, query.get("caption", ""))
-        return _entry_xml(self._entries[eid], wrap="entries")
+        return _entry_xml(self._entries[eid], wrap="entries", data=False)
 
     # Lookups
 
@@ -514,19 +532,19 @@ class FakeLabArchives:
 
     def _notebook(self, user: _User, nbid: str) -> str:
         if nbid not in user.notebook_ids:
-            raise _not_found(f"Notebook {nbid}")
+            raise _bad_id()
         return nbid
 
     def _folder(self, nbid: str, tree_id: str) -> _Node:
         node = self._nodes.get(tree_id)
         if node is None or node.notebook_id != nbid or node.is_page:
-            raise _not_found(f"Folder {tree_id}")
+            raise _bad_id()
         return node
 
     def _page(self, tree_id: str) -> _Node:
         node = self._nodes.get(tree_id)
         if node is None or not node.is_page:
-            raise _not_found(f"Page {tree_id}")
+            raise _bad_id()
         return node
 
     def _owned_page(self, user: _User, tree_id: str) -> _Node:
@@ -537,7 +555,7 @@ class FakeLabArchives:
     def _entry(self, eid: str) -> _Entry:
         entry = self._entries.get(eid)
         if entry is None:
-            raise _not_found(f"Entry {eid}")
+            raise _bad_id()
         return entry
 
     def _owned_entry(self, user: _User, eid: str) -> _Entry:
@@ -550,13 +568,16 @@ def _guess_type(filename: str) -> str:
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 
-def _entry_xml(entry: _Entry, *, wrap: str | None = None) -> str:
+def _entry_xml(entry: _Entry, *, wrap: str | None = None, data: bool = True) -> str:
+    """One entry. LabArchives sends ``<entry-data>`` when listing a page's
+    entries, but not in its answer to adding or updating one (``data=False``)."""
+    entry_data = f"<entry-data>{escape(entry.data)}</entry-data>" if data else ""
     xml = (
         f"<entry><eid>{entry.eid}</eid>"
         f"<part-type>{escape(entry.part_type)}</part-type>"
         f"<attach-file-name>{escape(entry.filename)}</attach-file-name>"
         f"<attach-content-type>{escape(entry.content_type)}</attach-content-type>"
-        f"<entry-data>{escape(entry.data)}</entry-data>"
+        f"{entry_data}"
         f'<version type="integer">{entry.version}</version></entry>'
     )
     return f"<{wrap}>{xml}</{wrap}>" if wrap else xml

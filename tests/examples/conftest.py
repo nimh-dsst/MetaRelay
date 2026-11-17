@@ -7,6 +7,7 @@ gets a fresh registry (``tests/conftest.py``), so register it again here.
 import os
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -40,6 +41,23 @@ def fake_labarchives(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[FakeLabA
         monkeypatch.setenv("METARELAY_LABARCHIVES_AKPASS", AKPASS)
         monkeypatch.setenv("METARELAY_LABARCHIVES_API_URL", url)
         yield fake, "labarchives://" + url.removeprefix("http://")
+
+
+@pytest.fixture
+def elabftw(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """The dev stack's eLabFTW, if ``METARELAY_ELABFTW_TEST_API_URL`` is set.
+
+    Yields its ``elabftw://`` URI and a fresh top-level name to work under,
+    with the ``METARELAY_ELABFTW_*`` variables set to reach it.
+    """
+    pytest.importorskip("elabapi_python")
+    api_url = os.environ.get("METARELAY_ELABFTW_TEST_API_URL")
+    if not api_url:
+        pytest.skip("set METARELAY_ELABFTW_TEST_API_URL to run against eLabFTW")
+    monkeypatch.setenv("METARELAY_ELABFTW_TOKEN", "metarelay-dev-key")
+    monkeypatch.setenv("METARELAY_ELABFTW_API_URL", api_url)
+    host = api_url.split("://", 1)[1].split("/", 1)[0]
+    return f"elabftw://{host}/experiments", f"Example run {uuid.uuid4().hex[:10]}"
 
 
 @pytest.fixture

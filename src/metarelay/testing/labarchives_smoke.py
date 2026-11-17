@@ -5,7 +5,7 @@ Run it against real LabArchives::
     export METARELAY_LABARCHIVES_AKID=...      # the institution's API key pair
     export METARELAY_LABARCHIVES_AKPASS=...
     python -m metarelay.testing.labarchives_smoke --notebook "My test notebook" \\
-        --record labarchives-live.json
+        --record recording.json
 
 It prints a login link. Log in, then paste the address the browser was sent
 back to (the page itself may fail to load; only its address matters).
@@ -19,12 +19,14 @@ It also reports whether LabArchives keeps the hidden marker (an HTML comment)
 MetaRelay puts in each preview entry. MetaRelay finds previews through the
 attachment's caption, so either answer works; the marker is only the
 fallback after a write that failed halfway. And it asks for a folder that
-doesn't exist, so the cassette records LabArchives' real not-found error
-code. ``--check-edits`` adds a step where you edit the preview in
-LabArchives by hand, to check that the next write refuses to overwrite it.
+doesn't exist, so the cassette records the error LabArchives answers with
+(4999, "your request contained bad information"). ``--check-edits`` adds a
+step where you edit the preview in LabArchives by hand, to check that the
+next write refuses to overwrite it.
 
-``--record`` saves the traffic as a cassette (secrets redacted; see
-``labarchives_cassettes``). Review it, then add it to
+``--record`` saves the traffic as a cassette with no real data in it: secrets
+are redacted, and IDs, personal details, and names the script did not create
+are replaced with fake values (see ``labarchives_cassettes``). Review it, then add it to
 ``tests/cassettes/labarchives/`` so the fake can be checked against it.
 
 CI runs the same script against the fake server with ``--auto-login``.
@@ -59,7 +61,7 @@ from metarelay.core.errors import ConflictError, MetaRelayError, ValidationError
 from metarelay.core.path import ROOT, LogicalPath
 from metarelay.core.record import Record
 from metarelay.core.session import Session
-from metarelay.testing.labarchives_cassettes import record_http
+from metarelay.testing.labarchives_cassettes import CassetteLeakError, record_http
 
 __all__ = ["SMOKE_SCHEMA_ID", "main", "run_smoke"]
 
@@ -310,6 +312,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_smoke(session, args.notebook, pause=pause)
     except (MetaRelayError, SmokeFailure) as error:
         print(f"Smoke test failed: {error}", file=sys.stderr)
+        # A cassette that could not be written is attached as a note.
+        for note in getattr(error, "__notes__", ()):
+            print(note, file=sys.stderr)
+        return 1
+    except CassetteLeakError as error:
+        print(error, file=sys.stderr)
         return 1
     return 0
 

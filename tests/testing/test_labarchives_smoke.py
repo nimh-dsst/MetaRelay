@@ -15,13 +15,19 @@ from metarelay.testing.labarchives_fake import FakeLabArchives, serve_fake
 pytest.importorskip("labapi")
 
 from metarelay.testing.labarchives_cassettes import (
+    CassetteLeakError,
+    _redact_text,
+    anonymize,
     compare_error_codes,
     compare_shapes,
     error_codes,
+    leaks,
     load_cassette,
+    record_http,
     xml_shapes,
 )
-from metarelay.testing.labarchives_smoke import main
+from metarelay.testing.labarchives_cassettes import main as cassettes_main
+from metarelay.testing.labarchives_smoke import MISSING_TREE_ID, SmokeFailure, main
 
 AKID, AKPASS = "smoke-akid", "smoke-akpass-secret"
 EMAIL, CODE = "ada@example.org", "auth-code-secret"
@@ -69,7 +75,7 @@ def test_smoke_passes_against_the_fake(base_url: str, capsys) -> None:
     assert "LabArchives keeps HTML comments" in out
     assert "updated in place" in out
     assert "can't contain folders" in out
-    assert "missing folder with error code 4404" in out
+    assert "missing folder with error code 4999" in out
 
 
 def test_smoke_reports_stripped_comments_and_still_passes(monkeypatch, capsys) -> None:
@@ -208,7 +214,19 @@ def test_differences_are_reported_both_ways() -> None:
 
 def test_error_codes_are_read_from_error_responses(tmp_path: Path) -> None:
     codes = error_codes(load_cassette(fake_cassette(tmp_path)))
-    assert codes == {"tree_tools/get_tree_level": {"4404"}}
+    assert codes == {"tree_tools/get_tree_level": {"4999"}}
+
+
+def test_error_codes_are_read_inside_the_class_root() -> None:
+    # What LabArchives sends: the error nested in <tree-tools>, beside the request.
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?><tree-tools><error>'
+        '<error-code type="integer">4999</error-code>'
+        "<error-description>your request contained bad information</error-description>"
+        "</error><request><class>tree_tools</class></request></tree-tools>"
+    )
+    live = [{"api": "tree_tools/get_tree_level", "status": 400, "body": body}]
+    assert error_codes(live) == {"tree_tools/get_tree_level": {"4999"}}
 
 
 def test_different_error_codes_are_reported() -> None:
@@ -241,10 +259,24 @@ def test_fake_matches_captured_cassettes(cassette: Path, tmp_path: Path) -> None
 @pytest.mark.skipif(not CASSETTES, reason="No cassettes captured from real LabArchives yet.")
 @pytest.mark.parametrize("cassette", CASSETTES, ids=lambda path: path.stem)
 def test_fake_error_codes_match_captured_cassettes(cassette: Path, tmp_path: Path) -> None:
-    """The fake's error codes are placeholders until a real cassette shows LabArchives' own."""
+    """Where both failed, the fake must answer with LabArchives' own error code."""
     live = error_codes(load_cassette(cassette))
     fake = error_codes(load_cassette(fake_cassette(tmp_path)))
+    # The smoke script asks for a missing folder, so a cassette with no error
+    # code means the code was not read, not that nothing failed.
+    assert live.get("tree_tools/get_tree_level")
     assert compare_error_codes(live=live, fake=fake) == []
+
+
+@pytest.mark.parametrize("cassette", CASSETTES, ids=lambda path: path.stem)
+def test_committed_cassettes_hold_only_fake_data(cassette: Path) -> None:
+    """Every element, attribute, and parameter is on a list, and holds its fake value."""
+    interactions = load_cassette(cassette)
+    assert leaks(interactions) == []
+
+    again = json.loads(json.dumps(interactions))
+    anonymize(again)
+    assert again == interactions  # nothing was left to replace
 
 
 # The dev stack's seed
@@ -264,9 +296,302 @@ def test_seed_is_json_with_users() -> None:
     assert seed["users"]
 
 
-def test_redaction_keeps_longer_ids_intact(tmp_path: Path) -> None:
-    from metarelay.testing.labarchives_cassettes import _redact_text
+def one_call(body: str, **params: str) -> dict:
+    return {
+        "method": "GET",
+        "api": "tree_tools/get_tree_level",
+        "params": params,
+        "status": 200,
+        "content_type": "application/xml",
+        "content_disposition": "",
+        "body": body,
+    }
 
+
+def test_anonymize_replaces_what_identifies_the_person() -> None:
+    call = one_call(
+        "<users><fullname>Ada Lovelace</fullname><first-name>Ada</first-name>"
+        "<last-name>Lovelace</last-name><orcid>0000-0001-2345-6789</orcid><sso-id></sso-id>"
+        "<entry><last-modified-by>Ada Lovelace</last-modified-by>"
+        "<last-modified-ip>203.0.113.7</last-modified-ip>"
+        "<entry-url>https://real.example.org/share/Private%20notebook/abc</entry-url>"
+        '<created-at type="datetime">2025-03-04T05:06:07Z</created-at>'
+        '<version type="integer">2</version></entry></users>'
+    )
+    anonymize([call])
+    for private in ("Ada", "Lovelace", "0000-0001", "203.0.113.7", "real.example", "Private"):
+        assert private not in call["body"]
+    assert "2025-03-04" not in call["body"]
+    assert "<fullname>Demo User</fullname>" in call["body"]
+    assert "<last-modified-ip>192.0.2.1</last-modified-ip>" in call["body"]
+    assert '<created-at type="datetime">2026-01-01T00:00:00Z</created-at>' in call["body"]
+    assert "<sso-id></sso-id>" in call["body"]  # an empty element stays empty
+    assert '<version type="integer">2</version>' in call["body"]
+
+
+def test_anonymize_keeps_only_the_names_the_script_created() -> None:
+    made = one_call("<tree-tools><node/></tree-tools>", display_text="Smoke & tests")
+    listed = one_call(
+        "<users><notebook><name>Grant drafts</name></notebook>"
+        "<level-node><display-text>Smoke &amp; tests</display-text></level-node>"
+        "<level-node><display-text>Unpublished results</display-text></level-node>"
+        "<level-node><display-text>Unpublished results</display-text></level-node></users>"
+    )
+    anonymize([listed, made])  # listed before the call that names it
+    assert listed["body"] == (
+        "<users><notebook><name>Notebook 1</name></notebook>"
+        "<level-node><display-text>Smoke &amp; tests</display-text></level-node>"
+        "<level-node><display-text>Item 1</display-text></level-node>"
+        "<level-node><display-text>Item 1</display-text></level-node></users>"
+    )
+
+
+def test_anonymize_gives_an_id_the_same_fake_value_everywhere() -> None:
+    notebook, page, entry = (
+        "Tm90ZWJvb2svMTIzNDU2Nzg5",
+        "VHJlZU5vZGUvOTg3NjU0MzIx",
+        "RW50cnlQYXJ0LzE5MjEzMTM1",
+    )
+    calls = [
+        one_call(f"<users><notebook><id>{notebook}</id></notebook></users>"),
+        one_call(
+            f"<entries><entry><eid>{entry}</eid><caption>preview {entry}</caption></entry>"
+            f"<request><pid>{page}</pid></request></entries>",
+            nbid=notebook,
+            pid=page,
+            parent_tree_id="0",
+        ),
+    ]
+    calls[1]["content_disposition"] = f'attachment; filename="a eid={entry}.json"'
+    anonymize(calls)
+
+    assert calls[0]["body"] == "<users><notebook><id>notebook-1</id></notebook></users>"
+    assert calls[1]["params"] == {"nbid": "notebook-1", "pid": "node-1", "parent_tree_id": "0"}
+    assert calls[1]["body"] == (
+        "<entries><entry><eid>entry-1</eid><caption>preview entry-1</caption></entry>"
+        "<request><pid>node-1</pid></request></entries>"
+    )
+    assert calls[1]["content_disposition"] == 'attachment; filename="a eid=entry-1.json"'
+
+    again = json.loads(json.dumps(calls))
+    anonymize(again)
+    assert again == calls  # doing it twice changes nothing more
+
+
+def test_anonymize_replaces_a_short_id_where_it_is_the_whole_value() -> None:
+    call = one_call(
+        "<tree-tools><tree-id>MTIzNDU2Nzg5</tree-id><caption>size MTIzNDU2Nzg5</caption>"
+        f"<parent-tree-id>0</parent-tree-id><pid>{MISSING_TREE_ID}</pid></tree-tools>",
+        tree_id="MTIzNDU2Nzg5",
+    )
+    anonymize([call])
+    assert call["params"] == {"tree_id": "node-1"}
+    # Not inside other text: a short ID could be part of an unrelated word.
+    assert call["body"] == (
+        "<tree-tools><tree-id>node-1</tree-id><caption>size MTIzNDU2Nzg5</caption>"
+        f"<parent-tree-id>0</parent-tree-id><pid>{MISSING_TREE_ID}</pid></tree-tools>"
+    )
+    assert leaks([call]) == []
+
+
+def test_anonymize_skips_numbers_that_are_already_taken() -> None:
+    call = one_call(
+        "<t><display-text>Secret project</display-text><display-text>Item 1</display-text>"
+        "<tree-id>VHJlZU5vZGUvOTg3NjU0MzIx</tree-id><tree-id>node-1</tree-id></t>"
+    )
+    anonymize([call])
+    assert call["body"] == (
+        "<t><display-text>Item 2</display-text><display-text>Item 1</display-text>"
+        "<tree-id>node-2</tree-id><tree-id>node-1</tree-id></t>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("real", "fake"),
+    [
+        ("2026-11-16T14:03:22Z", "2026-01-01T00:00:00Z"),
+        ("2026-11-16T14:03:22-05:00", "2026-01-01T00:00:00Z"),  # not the recorder's offset
+        ("2026-11-16T14:03:22.123Z", "2026-01-01T00:00:00Z"),
+        ("2026-11-16T14:03:22.123456+0530", "2026-01-01T00:00:00Z"),
+        ("run 2026-11-16 14.46.21", "run 2026-01-01 00.00.00"),
+        ("uploaded=2026-11-16T19_46_45Z.json", "uploaded=2026-01-01T00_00_00Z.json"),
+    ],
+)
+def test_anonymize_replaces_the_whole_timestamp(real: str, fake: str) -> None:
+    call = one_call(f"<e><caption>{real}</caption></e>")
+    anonymize([call])
+    assert call["body"] == f"<e><caption>{fake}</caption></e>"
+    assert leaks([call]) == []
+
+
+# What anonymize() does not know about must be reported, not passed through.
+
+
+@pytest.mark.parametrize(
+    ("body", "leak"),
+    [
+        (
+            "<users><institution>NIMH Section on X</institution></users>",
+            "the element <institution> is not on a list",
+        ),
+        (
+            "<users><signature-name>Jane Q</signature-name></users>",
+            "the element <signature-name> is not on a list",
+        ),
+        (
+            '<users><notebook name="Grant drafts"/></users>',
+            "the attribute 'name' on <notebook> is not on a list",
+        ),
+        ("<users><notebook/>Jane Q</users>", "there is text after <notebook>"),
+        ("<users><caption>10.1.2.3</caption></users>", "an IP address (10.1.2.3)"),
+        (
+            "<users><caption>https://real.example.org/share/x</caption></users>",
+            "a link (https://real.example.org)",
+        ),
+        ("<users><oops></users>", "the response is not XML, so it can't be checked"),
+        (
+            "<e><error-description>Notebook 'Grant drafts' not found</error-description></e>",
+            "<error-description> holds wording that is not on its list",
+        ),
+        (
+            "<e><last-modified-verb>edited by Jane Q</last-modified-verb></e>",
+            "<last-modified-verb> holds wording that is not on its list",
+        ),
+    ],
+)
+def test_leaks_reports_what_no_list_covers(body: str, leak: str) -> None:
+    call = one_call(body)
+    anonymize([call])
+    assert leaks([call]) == [f"tree_tools/get_tree_level: {leak}"]
+
+
+def test_leaks_reports_a_listed_value_that_is_still_real() -> None:
+    call = one_call(
+        "<users><fullname>Ada Lovelace</fullname><name>Grant drafts</name>"
+        "<tree-id>VHJlZU5vZGUvOTg3NjU0MzIx</tree-id><uid>12345</uid>"
+        "<created-at>2026-11-16T14:03:22-05:00</created-at></users>",
+        nbid="Tm90ZWJvb2svMTIzNDU2Nzg5",
+        uid="12345",
+        client_ip="203.0.113.7",
+    )
+    assert leaks([call]) == [
+        "tree_tools/get_tree_level: the parameter 'nbid' holds a real value",
+        "tree_tools/get_tree_level: the parameter 'uid' holds a real value",
+        "tree_tools/get_tree_level: the parameter 'client_ip' is not on a list",
+        "tree_tools/get_tree_level: a real timestamp (2026-11-16T14:03:22-05:00)",
+        "tree_tools/get_tree_level: <fullname> holds a real value",
+        "tree_tools/get_tree_level: <name> holds a real value",
+        "tree_tools/get_tree_level: <tree-id> holds a real value",
+        "tree_tools/get_tree_level: <uid> holds a real value",
+        "tree_tools/get_tree_level: <created-at> holds a real value",
+    ]
+
+
+def test_a_cassette_that_could_hold_real_data_is_not_written(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "old.json"
+    call = one_call("<users><institution>NIMH Section on X</institution></users>")
+    before = json.dumps({"version": 1, "interactions": [call]})
+    path.write_text(before)
+
+    assert cassettes_main([str(path)]) == 1
+
+    assert path.read_text() == before
+    err = capsys.readouterr().err
+    assert "the element <institution> is not on a list" in err
+    assert "NIMH" not in err  # the report names the element, not what it holds
+
+
+LEAKING = "<users><institution>NIMH Section on X</institution></users>"
+
+
+def test_a_leak_does_not_hide_the_failure_it_happened_in(tmp_path: Path) -> None:
+    path = tmp_path / "live.json"
+    with (
+        pytest.raises(SmokeFailure, match="preview was not updated") as caught,
+        record_http(path) as interactions,
+    ):
+        interactions.append(one_call(LEAKING))
+        raise SmokeFailure("preview was not updated in place")
+
+    [note] = caught.value.__notes__
+    assert "the element <institution> is not on a list" in note
+    assert not path.exists()
+
+
+def test_a_leak_is_the_error_when_nothing_else_failed(tmp_path: Path) -> None:
+    path = tmp_path / "live.json"
+    with (
+        pytest.raises(CassetteLeakError, match="<institution> is not on a list"),
+        record_http(path) as interactions,
+    ):
+        interactions.append(one_call(LEAKING))
+    assert not path.exists()
+
+
+def test_a_failed_run_without_a_leak_still_writes_its_cassette(tmp_path: Path) -> None:
+    path = tmp_path / "live.json"
+    with pytest.raises(SmokeFailure) as caught, record_http(path) as interactions:
+        interactions.append(one_call("<users><is-default>true</is-default></users>"))
+        raise SmokeFailure("preview was not updated in place")
+    assert not hasattr(caught.value, "__notes__")
+    assert len(load_cassette(path)) == 1
+
+
+def test_smoke_reports_the_failure_and_then_the_leak(
+    base_url: str, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import metarelay.testing.labarchives_smoke as smoke
+
+    def fail(*args, **kwargs):
+        raise SmokeFailure("preview was not updated in place")
+
+    def leak(path, interactions, secrets):
+        raise CassetteLeakError(f"Not writing {path}: the element <institution> is not on a list")
+
+    monkeypatch.setattr(smoke, "run_smoke", fail)
+    monkeypatch.setattr("metarelay.testing.labarchives_cassettes._write", leak)
+
+    assert run_smoke(base_url, "--record", str(tmp_path / "live.json")) == 1
+
+    err = capsys.readouterr().err.splitlines()
+    assert err[0] == "Smoke test failed: preview was not updated in place"
+    assert "the element <institution> is not on a list" in err[1]
+
+
+def test_the_fake_sends_nothing_the_lists_do_not_cover(tmp_path: Path) -> None:
+    assert leaks(load_cassette(fake_cassette(tmp_path))) == []
+
+
+def test_recording_keeps_the_folders_the_smoke_script_made(base_url: str, tmp_path: Path) -> None:
+    path = tmp_path / "live.json"
+    assert run_smoke(base_url, "--record", str(path)) == 0
+    text = path.read_text()
+    assert "<display-text>MetaRelay smoke tests</display-text>" in text
+    assert "Lab Notebook" not in text  # the script did not create the notebook
+    assert "<name>Notebook 1</name>" in text
+
+
+def test_a_cassette_recorded_earlier_can_be_anonymized_in_place(tmp_path: Path) -> None:
+    path = tmp_path / "old.json"
+    call = one_call(
+        "<tree-tools><node><display-text>Mine</display-text></node>"
+        "<level-node><display-text>Theirs</display-text></level-node>"
+        "<last-modified-ip>203.0.113.7</last-modified-ip></tree-tools>",
+        display_text="Mine",
+    )
+    path.write_text(json.dumps({"version": 1, "interactions": [call]}))
+
+    assert cassettes_main([str(path)]) == 0
+
+    [fake] = load_cassette(path)
+    assert fake["body"] == (
+        "<tree-tools><node><display-text>Mine</display-text></node>"
+        "<level-node><display-text>Item 1</display-text></level-node>"
+        "<last-modified-ip>192.0.2.1</last-modified-ip></tree-tools>"
+    )
+
+
+def test_redaction_keeps_longer_ids_intact(tmp_path: Path) -> None:
     body = "<users><id>U1</id><notebook><id>U12</id></notebook>ada@lab.org</users>"
     assert _redact_text(body, {"U1"}) == (
         "<users><id>REDACTED</id><notebook><id>U12</id></notebook>user@example.org</users>"

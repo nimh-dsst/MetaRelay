@@ -30,7 +30,13 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 EXAMPLES = REPO / "examples"
 DOCS = sorted([REPO / "README.md", *(REPO / "docs").glob("*.md")])
-DOCS_THAT_MUST_USE_EXAMPLES = ["quickstart.md", "concepts.md", "labarchives.md", "github.md"]
+DOCS_THAT_MUST_USE_EXAMPLES = [
+    "quickstart.md",
+    "concepts.md",
+    "labarchives.md",
+    "elabftw.md",
+    "github.md",
+]
 
 REGION = re.compile(
     r"^[ \t]*# \[docs:(?P<name>[\w-]+)\]\n(?P<body>.*?)^[ \t]*# \[/docs:(?P=name)\]\n",
