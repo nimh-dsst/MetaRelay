@@ -205,6 +205,79 @@ def test_unknown_page_is_an_api_error(user) -> None:
         user.api_get("tree_tools/get_entries_for_page", page_tree_id="nope", nbid="nope")
 
 
+# Shapes captured from real LabArchives (tests/cassettes/labarchives, issue #27)
+
+
+def test_adding_and_updating_an_entry_answer_with_the_entry_inside_entries(user) -> None:
+    page = user.notebooks["Lab Notebook"].create(labapi.NotebookPage, "Page")
+    nbid = user.notebooks["Lab Notebook"].id
+    added = user.api_post(
+        "entries/add_entry",
+        {"entry_data": "<p>a</p>"},
+        part_type="text entry",
+        pid=page.id,
+        nbid=nbid,
+    )
+    eid = added.findtext("entry/eid")
+    updated = user.api_post("entries/update_entry", {"entry_data": "<p>b</p>"}, eid=eid)
+
+    for answer in (added, updated):
+        assert answer.tag == "entries"
+        assert answer.findtext("entry/eid") == eid
+        # LabArchives sends the text back only when a page's entries are listed.
+        assert answer.find("entry/entry-data") is None
+    assert updated.findtext("entry/version") == "2"
+
+
+def test_adding_and_updating_an_attachment_answer_with_the_entry_inside_entries(user) -> None:
+    page = user.notebooks["Lab Notebook"].create(labapi.NotebookPage, "Page")
+    nbid = user.notebooks["Lab Notebook"].id
+    added = user.api_post(
+        "entries/add_attachment",
+        BytesIO(b"old"),
+        filename="a.txt",
+        caption="c",
+        pid=page.id,
+        nbid=nbid,
+    )
+    eid = added.findtext("entry/eid")
+    updated = user.api_post(
+        "entries/update_attachment", BytesIO(b"new"), filename="a.txt", caption="c", eid=eid
+    )
+
+    for answer in (added, updated):
+        assert answer.tag == "entries"
+        assert answer.findtext("entry/eid") == eid
+        assert answer.find("entry/entry-data") is None
+
+
+def test_an_id_that_names_nothing_is_error_4999_inside_the_class_root(
+    fake: FakeLabArchives, user
+) -> None:
+    with pytest.raises(labapi.ApiError) as caught:
+        user.api_get(
+            "tree_tools/get_tree_level",
+            nbid=user.notebooks["Lab Notebook"].id,
+            parent_tree_id="999999999",
+        )
+    assert caught.value.error_code == 4999
+
+    fake.verify_signatures = False
+    status, _, body = fake.handle(
+        "GET",
+        "/api/tree_tools/get_tree_level",
+        {"uid": user.id, "nbid": user.notebooks["Lab Notebook"].id, "parent_tree_id": "999999999"},
+        b"",
+        "",
+    )
+    assert status == 400
+    assert body.decode() == (
+        '<tree-tools><error><error-code type="integer">4999</error-code>'
+        "<error-description>your request contained bad information</error-description>"
+        "</error></tree-tools>"
+    )
+
+
 def test_other_users_cannot_see_a_notebook(fake: FakeLabArchives, client, user) -> None:
     fake.add_user("bob@example.org", auth_code="code-2", notebooks=["Bob's"])
     bob = client.login("bob@example.org", "code-2")
