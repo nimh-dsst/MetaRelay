@@ -27,7 +27,7 @@ uv run python -m examples.save_metadata "file://$PWD/metadata"
 
 | File | Holds |
 | --- | --- |
-| [`examples/login.py`](../examples/login.py) | `open_session(uri)`: `connect()` for most backends (eLabFTW and GitHub read their tokens from `METARELAY_ELABFTW_TOKEN` and `METARELAY_GITHUB_TOKEN`), the browser login for LabArchives |
+| [`examples/login.py`](../examples/login.py) | `open_session(uri)`: `connect()` for most backends (eLabFTW reads its API key from `METARELAY_ELABFTW_TOKEN`, GitHub its token from `METARELAY_GITHUB_TOKEN`), the browser login for LabArchives |
 | [`examples/lab_schemas.py`](../examples/lab_schemas.py) | The `lab.implant` schema every example uses. MetaRelay's own schemas replace it in #10 and #11 |
 
 ## How they stay correct

@@ -193,8 +193,10 @@ def _check_destination(destination: Destination) -> None:
 
 # LabArchives error codes that mean more than "could not". Codes labapi turns
 # into labapi.AuthenticationError (4506, 4514, 4520, 4533) never get here.
-# LabArchives' not-found codes aren't documented anywhere we can read; add them
-# here once the smoke script's deliberate bad-ID call captures a real one.
+# The smoke script's deliberate bad-ID call captured 4999 ("your request
+# contained bad information") from real LabArchives. That is a general code,
+# so it is not mapped to NotFoundError: MetaRelay finds things by name and
+# raises NotFoundError itself.
 _ERROR_CODES: dict[int, type[MetaRelayError]] = {
     4547: PermissionDeniedError,  # not the notebook owner (documented by labapi)
 }
@@ -239,11 +241,9 @@ def _is_container(node: Any) -> bool:
 def _escape_name(name: str) -> str:
     r"""``name`` as labapi needs it to create a node with exactly that name.
 
-    labapi 1.2 reads ``\`` and ``/`` in a name as path escapes, so they are
-    escaped; labapi 1.0.3 has no escapes and takes the name as it is.
+    labapi reads ``\`` and ``/`` in a name as path escapes, so they are escaped.
     """
-    escape = getattr(labapi.NotebookPath, "escape", None)
-    return escape(name)[0] if escape is not None else name
+    return labapi.NotebookPath.escape(name)[0]
 
 
 def _addressable(name: str) -> bool:

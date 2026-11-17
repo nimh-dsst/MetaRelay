@@ -98,8 +98,15 @@ migration converts them (plan D6, Goal 1c).
 LabArchives error 4547 (not the notebook's owner) raises
 `PermissionDeniedError`; bad credentials and expired sessions raise
 `AuthenticationError`. Any other LabArchives error, and network failures,
-raise `BackendUnavailableError`. LabArchives' not-found codes aren't
-documented yet, so they land there too until the smoke test captures one.
+raise `BackendUnavailableError`. That includes error 4999 ("your request
+contained bad information"), which is what LabArchives answers for an ID that
+names nothing. It is a general code, so MetaRelay does not read it as "not
+found". MetaRelay finds things by name and raises `NotFoundError` itself.
+
+The backend needs `labapi` 1.2.0 or later. LabArchives puts an error inside
+the API class's root element (`<tree-tools><error>...`), and earlier versions
+don't find the code there, so a bad login would not raise
+`AuthenticationError`.
 
 ## Edits made in LabArchives
 
@@ -151,12 +158,17 @@ service before the backend is accepted:
 ```bash
 export METARELAY_LABARCHIVES_AKID=... METARELAY_LABARCHIVES_AKPASS=...
 python -m metarelay.testing.labarchives_smoke --notebook "<a test notebook>" \
-    --record labarchives-live.json
+    --record recording.json
 ```
 
 It writes into a new `MetaRelay smoke tests/run <time>` folder (remove it
-afterwards; `labapi` cannot delete) and saves the traffic as a cassette, with
-secrets redacted. Review the cassette, then add it to
+afterwards; `labapi` cannot delete) and saves the traffic as a cassette. A
+cassette holds no real data: recording redacts secrets and replaces IDs,
+timestamps, your name, ORCID, and IP address, share links, and the name of
+every notebook, folder, and page the script did not create with fake values.
+If LabArchives sends an element the recorder has no rule for, it writes no
+cassette and names the element, so nothing passes through unchecked.
+Review the cassette anyway, then add it to
 `tests/cassettes/labarchives/`. The test suite compares it with the fake
 and fails wherever the fake sends something LabArchives doesn't, or answers
 the deliberate missing-folder request with a different error code.
