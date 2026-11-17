@@ -97,7 +97,6 @@ from metarelay.core.preview import (
     PreviewDiff,
     PreviewEdit,
     Table,
-    best_effort,
     diff_blocks,
     parse_html,
     render_preview,
@@ -514,21 +513,12 @@ class ElabFTWSession:
             local_checksum=record_checksum(record),
             remote_checksum=record_checksum(remote) if remote is not None else None,
             prior_receipt=prior_receipt,
+            # One body and one set of fields for every record in the entry,
+            # so a hand edit anywhere in it blocks writing any of them.
+            entry_edited=_saved_checksum(entry) != ours.get("preview_checksum"),
+            preview_diff=lambda: _entry_diff(entry, ours, path, records),
+            record_id=record.record_id,
         )
-        edited = _saved_checksum(entry) != ours.get("preview_checksum")
-        forced = WriteMode(mode) is WriteMode.FORCE
-        # Like decide_write: identical content with no receipt is not a conflict.
-        if edited and not forced and (action is WriteAction.WRITE or prior_receipt is not None):
-            diff = best_effort(lambda: _entry_diff(entry, ours, path, records))
-            changed = diff.describe(writing=record.record_id) + " " if diff else ""
-            raise ConflictError(
-                f"The eLabFTW entry for {self._describe(path)} was edited directly since "
-                f"MetaRelay last wrote it. {changed}"
-                "To keep the edit, copy it into the record first. Then write again with "
-                "mode='force', which rebuilds the whole entry, including the other "
-                "records' tables.",
-                preview_diff=diff,
-            )
         if action is WriteAction.WRITE:
             records[record.record_id] = record
             entry, ours = self._save(entry, path, ours["kind"], records)

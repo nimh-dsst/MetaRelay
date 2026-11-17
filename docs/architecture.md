@@ -97,6 +97,10 @@ receipt = session.write_record(where, record, prior_receipt=prior)
    - a preview edited since `prior`: `ConflictError`;
    - otherwise, skip if the content is already the same, or write.
 
+   Where several records share one preview (an eLabFTW entry), the backend
+   passes `entry_edited` instead: a hand edit anywhere in the entry is a
+   `ConflictError` for every write into it, new records too, until `force`.
+
    On `ConflictError` nothing is written.
 9. On write, `render_preview(record).markdown` (`core/preview.py`) builds the
    table. The `.json` and `.md` are written atomically, then the folder's

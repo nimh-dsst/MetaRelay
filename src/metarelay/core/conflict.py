@@ -66,6 +66,8 @@ def decide_write(
     prior_receipt: Receipt | None,
     remote_preview_checksum: str | None = None,
     preview_diff: Callable[[], PreviewDiff | None] | None = None,
+    entry_edited: bool = False,
+    record_id: str | None = None,
 ) -> WriteAction:
     """Decide whether to write, skip, or refuse.
 
@@ -81,6 +83,14 @@ def decide_write(
         preview_diff: Says what changed in an edited preview (usually a
             ``preview.preview_diff`` call). Called only when the preview was
             edited; its result goes on the ``ConflictError``.
+        entry_edited: For backends where several records share one preview
+            (an eLabFTW entry): someone edited it by hand since MetaRelay
+            last wrote it. Writing would rebuild the whole entry, so this
+            blocks every write into it, new records too, until
+            ``mode="force"``. Identical content with no receipt is still not
+            a conflict, as for one record.
+        record_id: The ID of the record being written. With ``entry_edited``,
+            edits to the other records in the entry are named in the message.
 
     A record that was deleted at the destination since the last sync is
     written again, as in Chronoxiv.
@@ -99,6 +109,7 @@ def decide_write(
         raise ValidationError(f"Unknown write mode {mode!r}; expected one of {modes}.") from error
 
     if remote_checksum is None:
+        _refuse_entry_edit(entry_edited, mode, preview_diff, record_id)
         return WriteAction.WRITE
 
     if mode is WriteMode.FORCE:
@@ -112,6 +123,10 @@ def decide_write(
             raise ConflictError("A different record already uses this ID at the destination.")
     elif remote_checksum not in {prior_receipt.checksum, local_checksum}:
         raise ConflictError("The record changed at the destination since it was last synced.")
+
+    if prior_receipt is not None or remote_checksum != local_checksum:
+        # Not for identical content with no receipt: that writes nothing.
+        _refuse_entry_edit(entry_edited, mode, preview_diff, record_id)
 
     if (
         prior_receipt is not None
@@ -129,6 +144,25 @@ def decide_write(
         )
 
     return WriteAction.SKIP if remote_checksum == local_checksum else WriteAction.WRITE
+
+
+def _refuse_entry_edit(
+    entry_edited: bool,
+    mode: WriteMode,
+    preview_diff: Callable[[], PreviewDiff | None] | None,
+    record_id: str | None,
+) -> None:
+    """Raise if a write would rebuild an entry someone edited by hand."""
+    if not entry_edited or mode is WriteMode.FORCE:
+        return
+    diff = best_effort(preview_diff) if preview_diff is not None else None
+    raise ConflictError(
+        "The entry holding this record was edited directly since MetaRelay last wrote it. "
+        + (diff.describe(writing=record_id) + " " if diff is not None else "")
+        + "To keep the edit, copy it into the record first. Then write again with "
+        "mode='force', which rebuilds the whole entry, including the other records' tables.",
+        preview_diff=diff,
+    )
 
 
 def accept_edits(
