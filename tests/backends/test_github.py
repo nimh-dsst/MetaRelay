@@ -593,6 +593,30 @@ def test_an_edit_on_github_can_be_accepted_into_the_record(session, fake, make_r
     session.write_record(STUDY, make_record(diameter_um=300), prior_receipt=next_receipt)
 
 
+def test_an_edit_to_a_stale_preview_cannot_be_accepted(session, fake, make_record) -> None:
+    """After a write saved the record but not its preview, the preview still
+    shows the old record. Its old values must not read as a person's edits:
+    accepting them would undo the write."""
+    from metarelay import ConflictError, accept_edits
+
+    first = session.write_record(STUDY, make_record(diameter_um=400))
+    _fail_put_to(session, "fiber-1.md", ConflictError("sha does not match"))
+    with pytest.raises(ConflictError, match="was saved") as caught:
+        session.write_record(STUDY, make_record(diameter_um=300), prior_receipt=first)
+    saved = caught.value.receipt
+
+    md_path = saved.backend_ids["path"].removesuffix(".json") + ".md"
+    text = fake.files(REPO)[md_path].decode()
+    fake.put_file(REPO, md_path, text.replace("| subject_id | M1 |", "| subject_id | M2 |"))
+    with pytest.raises(ConflictError, match="preview was edited") as raised:
+        session.write_record(STUDY, make_record(diameter_um=300), prior_receipt=saved)
+    diff = raised.value.preview_diff
+    assert diff is not None and not diff.complete
+    with pytest.raises(ConflictError, match="can't list"):
+        accept_edits(session, STUDY, make_record(diameter_um=300), diff)
+    assert session.read_record(STUDY, "fiber-1").record.payload == {"diameter_um": 300.0}
+
+
 # Found in review, checked against real GitHub
 
 

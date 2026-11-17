@@ -87,7 +87,7 @@ from metarelay.core.errors import (
     ValidationError,
 )
 from metarelay.core.path import ROOT, Container, LogicalPath
-from metarelay.core.preview import preview_diff, render_preview
+from metarelay.core.preview import PreviewDiff, preview_diff, render_preview
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
 from metarelay.core.session import StoredRecord
@@ -349,6 +349,31 @@ class _Index:
         return (json.dumps(content, indent=2, ensure_ascii=False) + "\n").encode()
 
 
+def _stored_preview_diff(
+    stored: bytes | None, preview: bytes | None, written_preview: str | None
+) -> PreviewDiff | None:
+    """What someone changed in the ``.md`` preview, compared with the stored record.
+
+    The record and its preview are separate commits, so a write can save the
+    record and then fail on the preview, leaving it a render of the record
+    before. Compared with the stored record, the old values would read as a
+    person's edits, and accepting them would undo the write. So the diff is
+    complete only when the preview MetaRelay last wrote (the index's
+    checksum) is the stored record's own render.
+    """
+    text = preview.decode(errors="replace") if preview is not None else None
+    diff = preview_diff(stored, text, format="markdown")
+    if diff is None or not diff.complete:
+        return diff
+    try:
+        rendered = render_preview(Record.model_validate_json(stored or b"")).markdown
+    except ValueError:
+        rendered = None
+    if rendered is None or preview_checksum(rendered) != written_preview:
+        return PreviewDiff(edits=diff.edits, complete=False)
+    return diff
+
+
 def _saved_but(
     error: MetaRelayError, record_id: str, step: str, receipt: Receipt
 ) -> MetaRelayError:
@@ -454,16 +479,15 @@ class GitHubSession:
             if remote_preview is not None
             else None
         )
+        written_preview = self._written_preview(index, record_id)
         action = decide_write(  # also rejects an unknown mode
             mode=mode,
             local_checksum=record_checksum(record),
             remote_checksum=self._checksum_of(remote_bytes) if remote_bytes is not None else None,
             prior_receipt=prior_receipt,
             remote_preview_checksum=remote_preview_sum,
-            preview_diff=lambda: preview_diff(
-                remote_bytes,
-                remote_preview.decode(errors="replace") if remote_preview is not None else None,
-                format="markdown",
+            preview_diff=lambda: _stored_preview_diff(
+                remote_bytes, remote_preview, written_preview
             ),
         )
 
@@ -483,7 +507,6 @@ class GitHubSession:
 
         preview = render_preview(record).markdown
         new_preview_sum = preview_checksum(preview)
-        written_preview = self._written_preview(index, record_id)
         if action is WriteAction.WRITE:
             data = (record.model_dump_json(indent=2) + "\n").encode()
             verb = "create" if json_entry is None else "update"
@@ -507,8 +530,9 @@ class GitHubSession:
             except ConflictError:
                 error = ConflictError(
                     f"The record {record_id!r} was saved, but its preview was edited at GitHub "
-                    "while MetaRelay was writing it. Read the record, then write again with "
-                    "mode='force' to replace the edited preview."
+                    "while MetaRelay was writing it, so the preview still shows the record "
+                    "before this write. Copy any edit you want to keep into the record, then "
+                    "write again with mode='force' to replace the preview."
                 )
                 error.receipt = receipt(token, written_preview)  # type: ignore[attr-defined]
                 raise error from None
