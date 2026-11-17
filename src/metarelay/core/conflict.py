@@ -124,8 +124,9 @@ def decide_write(
     elif remote_checksum not in {prior_receipt.checksum, local_checksum}:
         raise ConflictError("The record changed at the destination since it was last synced.")
 
-    if prior_receipt is not None or remote_checksum != local_checksum:
-        # Not for identical content with no receipt: that writes nothing.
+    if prior_receipt is not None:
+        # Not for identical content with no receipt (different content was
+        # refused above): that writes nothing.
         _refuse_entry_edit(entry_edited, mode, preview_diff, record_id)
 
     if (
@@ -134,13 +135,10 @@ def decide_write(
         and remote_preview_checksum is not None
         and remote_preview_checksum != prior_receipt.preview_checksum
     ):
-        diff = best_effort(preview_diff) if preview_diff is not None else None
-        raise ConflictError(
-            "The notebook entry was edited directly since it was last synced. "
-            + (diff.describe() + " " if diff is not None else "")
-            + "To keep the edit, copy it into the record first. Then write again "
-            "with mode='force' to replace the entry.",
-            preview_diff=diff,
+        raise _edited(
+            "The notebook entry was edited directly since it was last synced.",
+            preview_diff,
+            force=" to replace the entry.",
         )
 
     return WriteAction.SKIP if remote_checksum == local_checksum else WriteAction.WRITE
@@ -155,12 +153,31 @@ def _refuse_entry_edit(
     """Raise if a write would rebuild an entry someone edited by hand."""
     if not entry_edited or mode is WriteMode.FORCE:
         return
+    raise _edited(
+        "The entry holding this record was edited directly since MetaRelay last wrote it.",
+        preview_diff,
+        writing=record_id,
+        force=", which rebuilds the whole entry, including the other records' tables.",
+    )
+
+
+def _edited(
+    what: str,
+    preview_diff: Callable[[], PreviewDiff | None] | None,
+    *,
+    force: str,
+    writing: str | None = None,
+) -> ConflictError:
+    """The conflict for a hand edit: what was edited, what changed, and how to keep it.
+
+    The diff is built only here, once a conflict is certain.
+    """
     diff = best_effort(preview_diff) if preview_diff is not None else None
-    raise ConflictError(
-        "The entry holding this record was edited directly since MetaRelay last wrote it. "
-        + (diff.describe(writing=record_id) + " " if diff is not None else "")
+    return ConflictError(
+        f"{what} "
+        + (diff.describe(writing=writing) + " " if diff is not None else "")
         + "To keep the edit, copy it into the record first. Then write again with "
-        "mode='force', which rebuilds the whole entry, including the other records' tables.",
+        f"mode='force'{force}",
         preview_diff=diff,
     )
 

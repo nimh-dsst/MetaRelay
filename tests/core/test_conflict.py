@@ -33,13 +33,16 @@ def receipt(checksum: str = PRIOR, preview_checksum: str | None = None) -> Recei
     )
 
 
-def decide(mode=WriteMode.UPSERT, remote=None, prior=None, remote_preview=None) -> WriteAction:
+def decide(
+    mode=WriteMode.UPSERT, remote=None, prior=None, remote_preview=None, **kwargs
+) -> WriteAction:
     return decide_write(
         mode=mode,
         local_checksum=LOCAL,
         remote_checksum=remote,
         prior_receipt=prior,
         remote_preview_checksum=remote_preview,
+        **kwargs,
     )
 
 
@@ -250,14 +253,7 @@ class TestEntryEdits:
 
     @staticmethod
     def decide(mode=WriteMode.UPSERT, remote=None, prior=None, **kwargs) -> WriteAction:
-        return decide_write(
-            mode=mode,
-            local_checksum=LOCAL,
-            remote_checksum=remote,
-            prior_receipt=prior,
-            entry_edited=True,
-            **kwargs,
-        )
+        return decide(mode, remote, prior, entry_edited=True, **kwargs)
 
     @pytest.mark.parametrize("mode", [WriteMode.UPSERT, WriteMode.CREATE])
     def test_it_blocks_a_new_record(self, mode) -> None:
@@ -308,13 +304,21 @@ class TestEntryEdits:
         assert raised.value.preview_diff is None
 
     def test_an_unedited_entry_changes_nothing(self) -> None:
-        assert (
-            decide_write(
-                mode=WriteMode.UPSERT,
-                local_checksum=LOCAL,
-                remote_checksum=None,
-                prior_receipt=None,
-                entry_edited=False,
-            )
-            is WriteAction.WRITE
-        )
+        assert decide(entry_edited=False) is WriteAction.WRITE
+
+    @pytest.mark.parametrize(
+        ("edited", "mode", "remote", "has_receipt"),
+        [
+            (False, WriteMode.UPSERT, None, False),
+            (False, WriteMode.UPSERT, PRIOR, True),
+            (True, WriteMode.UPSERT, LOCAL, False),
+            (True, WriteMode.FORCE, PRIOR, True),
+        ],
+        ids=["not edited, new", "not edited, update", "identical, no receipt", "force"],
+    )
+    def test_the_diff_is_built_only_for_a_conflict(self, edited, mode, remote, has_receipt):
+        # Building it reads and renders the whole entry: not on every write.
+        calls: list[None] = []
+        prior = receipt() if has_receipt else None
+        decide(mode, remote, prior, entry_edited=edited, preview_diff=lambda: calls.append(None))
+        assert calls == []

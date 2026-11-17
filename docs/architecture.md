@@ -90,7 +90,8 @@ receipt = session.write_record(where, record, prior_receipt=prior)
    of the stored preview (`core/checksum.py`).
 8. **`decide_write`** (`core/conflict.py`) compares those with the new
    record's checksum and with `prior`:
-   - nothing there, or `force` mode: write;
+   - `force` mode: write;
+   - nothing there: write (unless its entry was edited, below);
    - `create` mode with a record there: `ConflictError`;
    - content other than the new record's or the one `prior` describes:
      `ConflictError`;
