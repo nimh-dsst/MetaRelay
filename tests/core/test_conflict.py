@@ -92,7 +92,7 @@ class TestPreviewEdits:
     """D7: an edit made directly in the notebook is reported, never overwritten."""
 
     def test_edited_preview_is_a_conflict(self) -> None:
-        with pytest.raises(ConflictError, match="edited directly"):
+        with pytest.raises(ConflictError, match="preview was edited directly"):
             decide(remote=PRIOR, prior=receipt(preview_checksum="p1"), remote_preview="p2")
 
     def test_edited_preview_is_a_conflict_even_if_the_record_is_unchanged(self) -> None:

@@ -121,10 +121,12 @@ def decide_write(
     ):
         diff = best_effort(preview_diff) if preview_diff is not None else None
         raise ConflictError(
-            "The notebook entry was edited directly since it was last synced. "
+            # Every backend with previews comes here (a .md file on disk or
+            # GitHub, a LabArchives entry), so name what they share.
+            "The record's preview was edited directly since it was last synced. "
             + (diff.describe() + " " if diff is not None else "")
             + "To keep the edit, copy it into the record first. Then write again "
-            "with mode='force' to replace the entry.",
+            "with mode='force' to replace the preview.",
             preview_diff=diff,
         )
 
