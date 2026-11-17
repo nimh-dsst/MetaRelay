@@ -11,8 +11,9 @@ What it does:
   folders exist only because files are in them, as in Git;
 - checks the bearer token on every call (401 ``Bad credentials`` otherwise);
 - answers ``GET /repos/{owner}/{repo}``, ``GET .../branches/{branch}``,
-  ``GET .../contents/{path}?ref=`` (a file or a folder listing),
-  ``GET .../git/blobs/{sha}`` and ``PUT .../contents/{path}``;
+  ``GET .../contents/{path}?ref=`` (a file or a folder listing, cut off at
+  1,000 entries as GitHub does), ``GET .../git/trees/{sha}`` (one folder,
+  uncapped), ``GET .../git/blobs/{sha}`` and ``PUT .../contents/{path}``;
 - enforces the blob ``sha`` the way GitHub does: a ``PUT`` to an existing
   file without a ``sha`` is 422, and one with a stale ``sha`` is 409;
 - uses Git's real blob SHA-1, so ``sha`` values match what GitHub would
@@ -58,6 +59,9 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 __all__ = ["FakeGitHub", "FakeRepo", "git_blob_sha", "serve_fake"]
+
+LISTING_CAP = 1000
+"""GitHub's contents API lists at most 1,000 entries in a folder."""
 
 INLINE_LIMIT = 1024 * 1024
 """GitHub's contents API inlines files up to 1 MB; larger ones come back
@@ -115,7 +119,7 @@ class FakeGitHub:
         self.repos: dict[str, FakeRepo] = {}
         self.requests: list[tuple[str, str]] = []
         """Every ``(method, path)`` served, for tests to count calls."""
-        self._failures: list[_Response] = []
+        self._failures: list[tuple[str | None, _Response]] = []
         self._lock = threading.Lock()
 
     # Setting up state
@@ -156,12 +160,20 @@ class FakeGitHub:
             del self.repo(full_name).branches[branch][path]
 
     def fail_next(
-        self, status: int, message: str = "", headers: Mapping[str, str] | None = None
+        self,
+        status: int,
+        message: str = "",
+        headers: Mapping[str, str] | None = None,
+        *,
+        method: str | None = None,
     ) -> None:
-        """Answer the next request with this error instead of serving it."""
+        """Answer the next request (the next ``method`` one, if given) with this error."""
         self._failures.append(
-            _Response(
-                status, {"message": message or HTTPStatus(status).phrase}, dict(headers or {})
+            (
+                method,
+                _Response(
+                    status, {"message": message or HTTPStatus(status).phrase}, dict(headers or {})
+                ),
             )
         )
 
@@ -174,8 +186,10 @@ class FakeGitHub:
         with self._lock:
             parts = urlsplit(target)
             self.requests.append((method, parts.path))
-            if self._failures:
-                return self._failures.pop(0)
+            for position, (only, failure) in enumerate(self._failures):
+                if only is None or only == method:
+                    del self._failures[position]
+                    return failure
             if self.token is not None:
                 auth = {k.lower(): v for k, v in headers.items()}.get("authorization", "")
                 scheme, _, token = auth.partition(" ")
@@ -203,7 +217,18 @@ class FakeGitHub:
             branch = "/".join(rest[1:])
             if branch not in repo.branches:
                 raise _Fail(_error(404, "Branch not found"))
-            return _Response(200, {"name": branch, "commit": {"sha": _commit_sha(repo)}})
+            return _Response(
+                200,
+                {
+                    "name": branch,
+                    "commit": {
+                        "sha": _commit_sha(repo),
+                        "commit": {"tree": {"sha": _tree_sha(branch, "")}},
+                    },
+                },
+            )
+        if method == "GET" and rest[:2] == ["git", "trees"] and len(rest) == 3:
+            return self._get_tree(repo, rest[2])
         if method == "GET" and rest[:2] == ["git", "blobs"] and len(rest) == 3:
             return self._get_blob(repo, rest[2])
         if rest[:1] == ["contents"]:
@@ -229,20 +254,32 @@ class FakeGitHub:
             else:
                 entry |= {"content": _b64(data), "encoding": "base64"}
             return _Response(200, entry)
-        prefix = f"{path}/" if path else ""
-        children: dict[str, dict[str, Any]] = {}
-        for file_path, data in files.items():
-            if not file_path.startswith(prefix):
-                continue
-            name, _, deeper = file_path[len(prefix) :].partition("/")
-            child = f"{prefix}{name}"
-            if deeper:
-                children.setdefault(name, _entry(child, "dir", child.encode()))
-            else:
-                children[name] = _entry(child, "file", data)
+        children = _children(files, path, ref)
         if not children:
             raise _Fail(_error(404, "Not Found"))
-        return _Response(200, [children[name] for name in sorted(children)])
+        return _Response(200, [children[name] for name in sorted(children)][:LISTING_CAP])
+
+    def _get_tree(self, repo: FakeRepo, sha: str) -> _Response:
+        """One folder (not recursive), found by the tree ID its listing gave."""
+        for branch, files in repo.branches.items():
+            folders = {""} | {
+                "/".join(path.split("/")[:depth])
+                for path in files
+                for depth in range(1, path.count("/") + 1)
+            }
+            for folder in folders:
+                if _tree_sha(branch, folder) == sha:
+                    children = _children(files, folder, branch)
+                    tree = [
+                        {
+                            "path": name,
+                            "type": "tree" if entry["type"] == "dir" else "blob",
+                            "sha": entry["sha"],
+                        }
+                        for name, entry in sorted(children.items())
+                    ]
+                    return _Response(200, {"sha": sha, "tree": tree, "truncated": False})
+        raise _Fail(_error(404, "Not Found"))
 
     def _get_blob(self, repo: FakeRepo, sha: str) -> _Response:
         for files in repo.branches.values():
@@ -322,12 +359,33 @@ def _error(status: int, message: str) -> _Response:
     )
 
 
-def _entry(path: str, kind: str, data: bytes) -> dict[str, Any]:
+def _children(files: Mapping[str, bytes], path: str, branch: str) -> dict[str, dict[str, Any]]:
+    """The entries directly in the folder at ``path``, by name."""
+    prefix = f"{path}/" if path else ""
+    children: dict[str, dict[str, Any]] = {}
+    for file_path, data in files.items():
+        if not file_path.startswith(prefix):
+            continue
+        name, _, deeper = file_path[len(prefix) :].partition("/")
+        child = f"{prefix}{name}"
+        if deeper:
+            children.setdefault(name, _entry(child, "dir", b"", branch=branch))
+        else:
+            children[name] = _entry(child, "file", data)
+    return children
+
+
+def _tree_sha(branch: str, folder: str) -> str:
+    """A stable ID for a folder (GitHub's are content hashes; tests needn't be)."""
+    return hashlib.sha1(f"tree:{branch}:{folder}".encode()).hexdigest()
+
+
+def _entry(path: str, kind: str, data: bytes, *, branch: str = "") -> dict[str, Any]:
     return {
         "type": kind,
         "name": path.rsplit("/", 1)[-1],
         "path": path,
-        "sha": git_blob_sha(data) if kind == "file" else hashlib.sha1(data).hexdigest(),
+        "sha": git_blob_sha(data) if kind == "file" else _tree_sha(branch, path),
         "size": len(data) if kind == "file" else 0,
     }
 

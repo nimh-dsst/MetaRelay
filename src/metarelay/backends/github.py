@@ -57,7 +57,9 @@ import contextlib
 import hashlib
 import json
 import os
+import random
 import re
+import time
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -99,6 +101,11 @@ DEFAULT_MAX_FILE_BYTES = 1024 * 1024
 HARD_MAX_FILE_BYTES = 50 * 1024 * 1024
 """GitHub warns about files over 50 MB and rejects them over 100 MB."""
 _INDEX_RETRIES = 5
+_BRANCH_RETRIES = 6
+_BRANCH_BACKOFF = 0.25
+"""Seconds before the first retry when other commits moved the branch; doubles each time."""
+_LISTING_CAP = 1000
+"""The Contents API lists at most this many entries in a folder."""
 
 _OWNER = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,38})$")
 _REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
@@ -207,6 +214,10 @@ def _github_message(response: httpx.Response) -> str:
     return " ".join(str(message).split())[:300]
 
 
+class _BranchMoved(BackendUnavailableError):
+    """Another commit landed on the branch during a write. Safe to resend."""
+
+
 def _raise_for(response: httpx.Response, action: str) -> None:
     status = response.status_code
     if status < 400:
@@ -233,6 +244,13 @@ def _raise_for(response: httpx.Response, action: str) -> None:
         )
     if status == 404:
         raise NotFoundError(f"GitHub could not find what it needed to {action}.")
+    if status == 409 and "but expected" in message.lower():
+        # "<ref> is at <sha> but expected <sha>": another commit (to any file)
+        # landed on the branch at the same moment. Not a conflict on ours.
+        raise _BranchMoved(
+            f"Other commits kept landing on the branch while MetaRelay tried to {action}. "
+            "Try again."
+        )
     if status == 409 and "does not match" not in message.lower():
         if any(word in message.lower() for word in ("pull request", "protected", "rule")):
             raise PermissionDeniedError(
@@ -309,6 +327,9 @@ def _twin(entries: Mapping[str, _Entry], name: str) -> str | None:
 class _Entry:
     kind: str  # "file" or "dir"
     sha: str
+    stored: str = ""
+    """The name as committed. Entries are keyed by its NFC form; they differ
+    for a name committed in NFD (some Linux tools do this)."""
 
 
 @dataclass
@@ -383,6 +404,7 @@ class GitHubSession:
                     break
                 if entry.kind != "dir":
                     raise ValidationError(f"{self._describe(here)} is a file, not a folder.")
+                self._refuse_other_form(entry, part)
                 if depth < len(path.parts) - 1:
                     entries = self._listing(here) or {}
             else:
@@ -491,7 +513,10 @@ class GitHubSession:
                 ) from None
             written_preview = new_preview_sum
         else:
-            assert json_entry is not None  # SKIP means the record is there
+            if json_entry is None:  # SKIP means the record is there
+                raise BackendUnavailableError(
+                    f"GitHub's listing changed while MetaRelay tried to {where}. Try again."
+                )
             token = json_entry.sha
             if (
                 prior_receipt is not None
@@ -557,10 +582,11 @@ class GitHubSession:
             except NotFoundError:
                 continue  # in the index, but deleted by hand
             except ValidationError:
-                # In a folder MetaRelay manages, a .json it never wrote that
-                # isn't a record (package.json at a repository root) is someone
-                # else's file. A damaged record MetaRelay wrote still fails loudly.
-                if index.sha is not None and record_id not in index.records:
+                # A .json MetaRelay never indexed that isn't a record
+                # (package.json at a repository root) is someone else's file,
+                # even where MetaRelay hasn't written yet. A damaged record
+                # MetaRelay wrote still fails loudly, and read_record of it too.
+                if record_id not in index.records:
                     continue
                 raise
         return found
@@ -589,6 +615,7 @@ class GitHubSession:
         entry = entries.get(name)
         if entry is not None and entry.kind != "file":
             raise ValidationError(f"{name!r} is a folder at the destination.")
+        self._refuse_other_form(entry, name)
         twin = _twin(entries, name)
         if twin is not None:
             raise ValidationError(
@@ -607,7 +634,8 @@ class GitHubSession:
 
         # Index first, so the upload is never mistaken for a record. If the
         # upload fails, take a name it added back out: the files list decides
-        # what counts as a record, so a stray name would hide one.
+        # what counts as a record, so a stray name would hide one. Not after a
+        # conflict: then someone else's upload of the same name holds it now.
         newly_listed = name not in index.files
         self._update_index(path, lambda latest: latest.files.append(name), current=index)
         try:
@@ -619,6 +647,8 @@ class GitHubSession:
                 action=f"write {name!r} in {self._describe(path)}",
                 cache=False,
             )
+        except ConflictError:
+            raise
         except MetaRelayError:
             if newly_listed and entry is None:
                 with contextlib.suppress(MetaRelayError):
@@ -677,11 +707,30 @@ class GitHubSession:
         return f"{self._repo_url}/contents/{quote(git_path)}"
 
     def _listing(self, path: LogicalPath) -> dict[str, _Entry] | None:
-        """The folder at ``path``, ``name -> entry``, or ``None`` if it doesn't exist."""
+        """The folder at ``path``, ``NFC name -> entry``, or ``None`` if it doesn't exist."""
         action = f"list {self._describe(path)}"
+        found = self._raw_listing(self._git_path(path), action)
+        if found is None:
+            return None
+        with _network_errors(action):
+            return {
+                _nfc(item["name"]): _Entry(
+                    kind="dir" if item["type"] in {"dir", "tree"} else "file",
+                    sha=item["sha"],
+                    stored=item["name"],
+                )
+                for item in found
+            }
+
+    def _raw_listing(self, git_path: str, action: str) -> list[dict[str, Any]] | None:
+        """GitHub's entries for the folder at ``git_path``, or ``None`` if missing.
+
+        The Contents API stops at 1,000 entries, so a folder that big is read
+        again with the Git Trees API, which has no such cap.
+        """
         found = self._request(
             "GET",
-            self._contents_url(self._git_path(path)),
+            self._contents_url(git_path),
             action,
             params={"ref": self._address.branch},
             missing_ok=True,
@@ -689,15 +738,38 @@ class GitHubSession:
         if found is None:
             return None
         if not isinstance(found, list):
-            raise ValidationError(f"{self._describe(path)} is a file, not a folder.")
+            raise ValidationError(f"{git_path or 'The destination root'} is a file, not a folder.")
+        if len(found) < _LISTING_CAP:
+            return found
+        tree = self._request(
+            "GET", f"{self._repo_url}/git/trees/{self._tree_sha(git_path, action)}", action
+        )
         with _network_errors(action):
-            return {
-                _nfc(item["name"]): _Entry(
-                    kind="dir" if item["type"] == "dir" else "file",
-                    sha=item["sha"],
+            if tree.get("truncated"):
+                raise ValidationError(
+                    f"{git_path} holds more entries than GitHub can list. Split it into folders."
                 )
-                for item in found
-            }
+            return [
+                {"name": item["path"], "type": item["type"], "sha": item["sha"]}
+                for item in tree["tree"]
+            ]
+
+    def _tree_sha(self, git_path: str, action: str) -> str:
+        """The Git tree ID of the folder at ``git_path``."""
+        if not git_path:
+            branch = self._request(
+                "GET", f"{self._repo_url}/branches/{quote(self._address.branch)}", action
+            )
+            with _network_errors(action):
+                sha = branch["commit"]["commit"]["tree"]["sha"]
+                if not isinstance(sha, str):
+                    raise TypeError
+                return sha
+        parent, _, name = git_path.rpartition("/")
+        for item in self._raw_listing(parent, action) or []:
+            if item.get("name") == name and item.get("type") in {"dir", "tree"}:
+                return str(item["sha"])
+        raise NotFoundError(f"GitHub could not find what it needed to {action}.")
 
     def _folder(self, path: LogicalPath) -> dict[str, _Entry]:
         """The folder at ``path``. Raises ``NotFoundError`` if it doesn't exist.
@@ -719,6 +791,7 @@ class GitHubSession:
         # Explain why: a name that differs only in case is the usual reason.
         parent = self._listing(path.parent)
         if parent is not None:
+            self._refuse_other_form(parent.get(path.name), path.name)
             self._refuse_twin(parent, path.name, path)
         raise NotFoundError(
             f"{self._describe(path)} does not exist. Create it first "
@@ -769,7 +842,17 @@ class GitHubSession:
         }
         if sha is not None:
             body["sha"] = sha
-        result = self._request("PUT", self._contents_url(git_path), action, body=body)
+        for attempt in range(_BRANCH_RETRIES):
+            try:
+                result = self._request("PUT", self._contents_url(git_path), action, body=body)
+                break
+            except _BranchMoved as error:
+                # The request still names the file's sha, so resending can't
+                # overwrite someone else's change to this file.
+                if attempt == _BRANCH_RETRIES - 1:
+                    raise BackendUnavailableError(str(error)) from None
+                delay = _BRANCH_BACKOFF * 2**attempt
+                time.sleep(delay + random.uniform(0, delay))
         with _network_errors(action):
             new_sha = result["content"]["sha"]
             if not isinstance(new_sha, str):
@@ -896,6 +979,16 @@ class GitHubSession:
     def _check_names(self, path: LogicalPath) -> None:
         for part in path.parts:
             check_local_name(part, "Container name")
+
+    def _refuse_other_form(self, entry: _Entry | None, name: str) -> None:
+        """Refuse a name committed in another Unicode form (NFD), rather than
+        reading a path that 404s or committing a second, look-alike copy."""
+        if entry is not None and entry.stored and entry.stored != name:
+            raise ValidationError(
+                f"{name!r} is committed at GitHub in a different Unicode form (NFD) than "
+                "MetaRelay uses. MetaRelay can't open it yet: rename it on GitHub (retype "
+                "the name), or use another name."
+            )
 
     def _refuse_twin(self, entries: Mapping[str, _Entry], name: str, here: LogicalPath) -> None:
         twin = _twin(entries, name)

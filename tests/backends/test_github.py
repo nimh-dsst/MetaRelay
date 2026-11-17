@@ -32,6 +32,7 @@ from metarelay.testing.github_fake import FakeGitHub, git_blob_sha, serve_fake
 
 pytest.importorskip("httpx")
 
+import metarelay.backends.github as github_backend
 from metarelay.backends.github import (
     INDEX_FILE,
     GitHubConfig,
@@ -567,3 +568,99 @@ def test_a_preview_edited_mid_write_keeps_the_receipt(session: GitHubSession, ma
     with pytest.raises(ConflictError, match="was saved") as caught:
         session.write_record(STUDY, make_record(diameter_um=200.0), prior_receipt=first)
     assert caught.value.receipt.checksum != first.checksum
+
+
+# Found in review, checked against real GitHub
+
+
+RACE = "refs/heads/main is at 1c2d3e but expected 4f5a6b"  # GitHub's wording, seen live
+
+
+def test_a_commit_racing_on_the_branch_is_retried(
+    session: GitHubSession, fake: FakeGitHub, make_record, monkeypatch
+) -> None:
+    monkeypatch.setattr(github_backend, "_BRANCH_BACKOFF", 0)
+    for _ in range(3):
+        fake.fail_next(409, RACE, method="PUT")
+    session.write_record(STUDY, make_record())
+    assert [item.record.record_id for item in session.list_records(STUDY)] == ["fiber-1"]
+    assert "records/Study/fiber-1.md" in fake.files(REPO)
+
+
+def test_a_branch_that_keeps_moving_is_backend_unavailable(
+    session: GitHubSession, fake: FakeGitHub, make_record, monkeypatch
+) -> None:
+    monkeypatch.setattr(github_backend, "_BRANCH_BACKOFF", 0)
+    for _ in range(github_backend._BRANCH_RETRIES):
+        fake.fail_next(409, RACE, method="PUT")
+    with pytest.raises(BackendUnavailableError, match="Other commits kept landing") as raised:
+        session.write_record(STUDY, make_record())
+    assert type(raised.value) is BackendUnavailableError  # the public class
+    assert "records/Study/fiber-1.json" not in fake.files(REPO)
+
+
+def test_folders_over_the_listing_cap_are_read_whole(
+    session: GitHubSession, fake: FakeGitHub, make_record
+) -> None:
+    receipt = session.write_record(STUDY, make_record("zz-last"))  # sorts after the cap
+    for number in range(1100):
+        fake.put_file(REPO, f"records/Study/a{number:04}.txt", "x")
+    assert [item.record.record_id for item in session.list_records(STUDY)] == ["zz-last"]
+    assert any("/git/trees/" in path for _, path in fake.requests)
+    # An update past the cap is an update, not "already exists".
+    session.write_record(STUDY, make_record("zz-last", 250.0), prior_receipt=receipt)
+    assert session.read_record(STUDY, "zz-last").record.payload["diameter_um"] == 250.0
+
+
+def test_foreign_json_where_metarelay_never_wrote_lists_nothing(
+    api_url: str, fake: FakeGitHub
+) -> None:
+    fake.put_file(REPO, "package.json", '{"name": "lab-site"}')
+    session = open_session(api_url, "github://my-lab/metadata@main")
+    assert session.list_records(ROOT) == []
+    session.close()
+
+
+NFD = "Expe\u0301rience"  # committed by some Linux tools
+NFC = "Exp\u00e9rience"
+
+
+def test_a_folder_committed_in_nfd_is_refused_not_duplicated(
+    session: GitHubSession, fake: FakeGitHub
+) -> None:
+    fake.put_file(REPO, f"records/{NFD}/notes.txt", "x")
+    with pytest.raises(ValidationError, match="Unicode form"):
+        session.ensure_container(LogicalPath((NFC, "Cohort A")))
+    with pytest.raises(ValidationError, match="Unicode form"):
+        session.list_records(LogicalPath((NFC,)))
+    assert not any(path.startswith(f"records/{NFC}/") for path in fake.files(REPO))
+
+
+def test_a_file_committed_in_nfd_is_refused_not_duplicated(
+    session: GitHubSession, fake: FakeGitHub
+) -> None:
+    fake.put_file(REPO, f"records/Study/{NFD}.txt", "x")
+    with pytest.raises(ValidationError, match="Unicode form"):
+        session.write_file(STUDY, f"{NFC}.txt", b"y")
+    assert f"records/Study/{NFC}.txt" not in fake.files(REPO)
+
+
+def test_an_upload_that_lost_a_race_keeps_its_name_listed(
+    session: GitHubSession, fake: FakeGitHub
+) -> None:
+    real_put = session._put
+
+    def someone_else_won(git_path, data, **kwargs):
+        if git_path.endswith("calib.json"):
+            fake.put_file(REPO, git_path, b"{}")  # their upload of the same name
+            raise ConflictError("already exists")
+        return real_put(git_path, data, **kwargs)
+
+    session._put = someone_else_won
+    with pytest.raises(ConflictError):
+        session.write_file(STUDY, "calib.json", b"{}")
+    session._put = real_put
+    # Still listed as a file, so their upload isn't read as a record.
+    assert session.list_records(STUDY) == []
+    index = json.loads(fake.files(REPO)[f"records/Study/{INDEX_FILE}"])
+    assert "calib.json" in index["files"]

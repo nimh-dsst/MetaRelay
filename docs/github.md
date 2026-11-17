@@ -76,14 +76,28 @@ counts as a record again.
 
 In a folder that has an index, a `.json` file MetaRelay didn't write and that
 isn't a record (a `package.json` at the repository root, say) is left out of
-`list_records`. Reading it by name still raises `ValidationError`. Using a
+`list_records`, even in a folder MetaRelay hasn't written to. Reading it by name still raises `ValidationError`. Using a
 prefix keeps MetaRelay's files apart from the rest of the repository.
 
 Names are matched in Unicode NFC form. A folder or file committed with an
-NFD name (some Linux tools do this) is listed but can't be opened yet.
+NFD name (some Linux tools do this) is listed, but opening it or writing to
+it raises `ValidationError` until it is renamed, rather than creating a
+second folder that looks the same.
+
+A folder can hold any number of files. GitHub lists at most 1,000 entries
+through the Contents API, so MetaRelay reads a folder that big again with the
+Git Trees API. `list_records` downloads every record in the folder, one
+request each, so a listing of hundreds of records takes a while and counts
+against GitHub's rate limit (5,000 requests an hour). Use `read_record` when
+you know the ID.
 
 Each changed file is one commit, so writing a record makes up to three
 (record, preview, index). Writing a record that hasn't changed makes none.
+When another commit lands on the branch at the same moment (two people
+writing at once, even to different files), GitHub refuses the commit and
+MetaRelay sends it again, a few times, waiting a little longer each time.
+Each attempt still names the file's `sha`, so a retry never overwrites a
+change to the same file.
 
 The record is written first. If the preview or index commit then fails, the
 error says the record was saved, and carries the new receipt as
@@ -127,6 +141,7 @@ and put its location in the record.
 | --- | --- |
 | 401 | `AuthenticationError` |
 | 403 (rate limit), 429, 5xx, network failure | `BackendUnavailableError` |
+| 409 because other commits kept moving the branch (after retries) | `BackendUnavailableError` |
 | 403 (other), 409 for a protected branch | `PermissionDeniedError` |
 | 409 for a stale `sha`, or 422 for a missing one | `ConflictError` |
 | Missing repository or branch at `connect()` | `ConfigurationError` |
