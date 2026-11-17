@@ -276,6 +276,10 @@ def test_describe() -> None:
     removed = edit.model_copy(update={"current": None})
     assert added.describe() == "a: added '2'"
     assert removed.describe() == "T · a: removed (was '1')"
+    other = edit.model_copy(update={"record_id": "s"})
+    both = PreviewDiff(edits=[edit, other], complete=True)
+    assert both.describe(writing="r") == "Changed: T · a: '1' → '2'; T · a of s: '1' → '2'."
+    assert both.describe() == "Changed: T · a: '1' → '2'; T · a: '1' → '2'."
 
 
 def test_an_inserted_row_does_not_shift_the_others() -> None:

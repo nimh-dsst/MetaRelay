@@ -92,7 +92,16 @@ from metarelay.core.errors import (
     ValidationError,
 )
 from metarelay.core.path import ROOT, Container, LogicalPath
-from metarelay.core.preview import PreviewDiff, Table, best_effort, diff_blocks, render_preview
+from metarelay.core.preview import (
+    Heading,
+    PreviewDiff,
+    PreviewEdit,
+    Table,
+    best_effort,
+    diff_blocks,
+    parse_html,
+    render_preview,
+)
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
 from metarelay.core.session import StoredRecord
@@ -311,21 +320,47 @@ def _render(
     return body, fields, {"extra_fields_groups": groups, "display_main_text": True}, origins
 
 
-def _field_diff(
+def _entry_diff(
     entry: Mapping[str, Any],
     ours: Mapping[str, Any],
     path: LogicalPath,
     records: Mapping[str, Record],
 ) -> PreviewDiff:
-    """What someone changed in the entry's fields since MetaRelay wrote them.
+    """What someone changed in the entry since MetaRelay wrote it.
 
-    The fields MetaRelay wrote are rebuilt from the stored records and
-    compared with the current ones by ``diff_blocks``, the rule every backend
-    uses. The edits are complete when putting the written values back gives
-    exactly the entry MetaRelay saved: then nothing else changed (the body,
-    the path fields, a field's settings, a field added by hand).
+    Both places a value shows are read: the fields, exactly, and the body's
+    tables, by their text (the editor reformats the HTML, as LabArchives
+    does). Both are compared with what the stored records render to, by
+    ``diff_blocks``, the rule every backend uses. The same change made in
+    both places is listed once.
+
+    The edits are complete when nothing else changed: putting the listed
+    field values back gives exactly the fields MetaRelay wrote (no field
+    added, renamed, or retyped, and the path fields intact), the body still
+    has the same headings and tables with nothing added between them, and the
+    body and the fields don't disagree about a value.
     """
     _, written, _, origins = _render(path, ours["kind"], records)
+    fields = _fields_diff(entry, written, origins)
+    body = _body_diff(entry.get("body"), records)
+    seen: dict[tuple[str, str | None, str, str | None], PreviewEdit] = {}
+    edits: list[PreviewEdit] = []
+    disagree = False
+    for edit in [*fields.edits, *body.edits]:
+        key = (edit.record_id, edit.table, edit.field, edit.written)
+        if key in seen:
+            if seen[key].current == edit.current:
+                continue  # the same change in the body and the field
+            disagree = True  # the body says one thing, the field another
+        seen.setdefault(key, edit)
+        edits.append(edit)
+    return PreviewDiff(edits=edits, complete=fields.complete and body.complete and not disagree)
+
+
+def _fields_diff(
+    entry: Mapping[str, Any], written: Mapping[str, Any], origins: Mapping[str, _Origin]
+) -> PreviewDiff:
+    """The edits to the record fields. Complete when nothing else in the fields changed."""
     current = entry["metadata"].get("extra_fields") or {}
     if not isinstance(current, dict):
         return PreviewDiff(edits=[], complete=False)
@@ -345,10 +380,46 @@ def _field_diff(
         old[-1].rows.append((row, value))
         if isinstance(now, dict):
             new[-1].rows.append((row, "" if now.get("value") is None else str(now["value"])))
-    clean = _entry_checksum(entry.get("body"), reverted) == ours.get("preview_checksum")
+    # eLabFTW stores the fields as written, so anything left over is another
+    # change. Not ``position``: it's display order, and re-rendering from the
+    # stored records (whose keys MySQL reorders) can number fields differently.
+    clean = _unordered(reverted) == _unordered(written)
     diffs = [diff_blocks(rid, old, new, clean=clean) for rid, (old, new) in tables.items()]
     edits = [edit for diff in diffs for edit in diff.edits]
     return PreviewDiff(edits=edits, complete=clean and all(diff.complete for diff in diffs))
+
+
+def _unordered(fields: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        label: {k: v for k, v in field.items() if k != "position"}
+        if isinstance(field, dict)
+        else field
+        for label, field in fields.items()
+    }
+
+
+def _body_diff(body: Any, records: Mapping[str, Record]) -> PreviewDiff:
+    """The edits to the body's tables, read by their text, record by record."""
+    if not isinstance(body, str):
+        return PreviewDiff(edits=[], complete=False)
+    found, clean = parse_html(body)
+    # The body is each record's preview in turn, each starting with its heading.
+    sections: list[list[Heading | Table]] = []
+    for block in found:
+        if isinstance(block, Heading) or not sections:
+            sections.append([])
+        sections[-1].append(block)
+    keys = sorted(records)
+    if len(sections) != len(keys):
+        return PreviewDiff(edits=[], complete=False)
+    diffs = [
+        diff_blocks(key, parse_html(render_preview(records[key]).html)[0], section, clean=clean)
+        for key, section in zip(keys, sections, strict=True)
+    ]
+    return PreviewDiff(
+        edits=[edit for diff in diffs for edit in diff.edits],
+        complete=clean and all(diff.complete for diff in diffs),
+    )
 
 
 def _metadata(
@@ -448,10 +519,11 @@ class ElabFTWSession:
         forced = WriteMode(mode) is WriteMode.FORCE
         # Like decide_write: identical content with no receipt is not a conflict.
         if edited and not forced and (action is WriteAction.WRITE or prior_receipt is not None):
-            diff = best_effort(lambda: _field_diff(entry, ours, path, records))
+            diff = best_effort(lambda: _entry_diff(entry, ours, path, records))
+            changed = diff.describe(writing=record.record_id) + " " if diff else ""
             raise ConflictError(
                 f"The eLabFTW entry for {self._describe(path)} was edited directly since "
-                f"MetaRelay last wrote it. {diff.describe() + ' ' if diff else ''}"
+                f"MetaRelay last wrote it. {changed}"
                 "To keep the edit, copy it into the record first. Then write again with "
                 "mode='force', which rebuilds the whole entry, including the other "
                 "records' tables.",
