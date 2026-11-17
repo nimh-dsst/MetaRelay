@@ -193,8 +193,10 @@ def _check_destination(destination: Destination) -> None:
 
 # LabArchives error codes that mean more than "could not". Codes labapi turns
 # into labapi.AuthenticationError (4506, 4514, 4520, 4533) never get here.
-# LabArchives' not-found codes aren't documented anywhere we can read; add them
-# here once the smoke script's deliberate bad-ID call captures a real one.
+# The smoke script's deliberate bad-ID call captured 4999 ("your request
+# contained bad information") from real LabArchives. That is a general code,
+# so it is not mapped to NotFoundError: MetaRelay finds things by name and
+# raises NotFoundError itself.
 _ERROR_CODES: dict[int, type[MetaRelayError]] = {
     4547: PermissionDeniedError,  # not the notebook owner (documented by labapi)
 }

@@ -11,27 +11,43 @@ The fake LabArchives server (``labarchives_fake``) is built from reading
    elements appear, not their values). Any element the fake sends that
    LabArchives doesn't is a bug in the fake.
 
-Recording redacts what would let someone act as the user: the ``akid``,
-``sig``, ``expires``, the login email and auth code, the user ID, and email
-addresses in response bodies. Attachment downloads are stored by size only.
-Responses still contain notebook, folder, and entry names from the test
-notebook, so review a cassette before committing it.
+A cassette holds no real data. Recording redacts what would let someone act
+as the user (the ``akid``, ``sig``, ``expires``, the login email and auth
+code, the user ID, and email addresses), then replaces every other value
+that came from the account with a fake one: IDs, timestamps, the person's
+name, ORCID, and IP address, share links, and the name of every notebook,
+folder, and page the script did not create itself. Attachment downloads are
+stored by size only. What stays is the shape of each response and what the
+smoke script wrote. Still review a cassette before committing it.
+
+To replace the values in a cassette recorded before these rules::
+
+    python -m metarelay.testing.labarchives_cassettes <cassette>.json
 """
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 from xml.etree import ElementTree
+from xml.sax.saxutils import unescape
 
 import requests
 
-__all__ = ["compare_shapes", "load_cassette", "record_http", "xml_shapes"]
+__all__ = [
+    "anonymize",
+    "anonymize_cassette",
+    "compare_shapes",
+    "load_cassette",
+    "record_http",
+    "xml_shapes",
+]
 
 CASSETTE_VERSION = 1
 REDACTED = "REDACTED"
@@ -39,6 +55,50 @@ _SECRET_PARAMS = frozenset(
     {"akid", "sig", "expires", "password", "login_or_email", "uid", "email", "auth_code"}
 )
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
+# Elements that identify the person or their network, and the fake value each gets.
+_PERSONAL = {
+    "fullname": "Demo User",
+    "first-name": "Demo",
+    "last-name": "User",
+    "last-modified-by": "Demo User",
+    "last-modified-ip": "192.0.2.1",
+    "orcid": "0000-0000-0000-0000",
+    "sso-id": "demo",
+    "suborganization": "Demo lab",
+    "entry-url": "https://labarchives.example/share/entry",
+    "nginx-call-start": "0.000",
+}
+# Elements and request parameters that hold an ID, and the kind of thing it names.
+_ID_KINDS = {
+    "id": "notebook",
+    "nbid": "notebook",
+    "tree-id": "node",
+    "tree_id": "node",
+    "parent-tree-id": "node",
+    "parent_tree_id": "node",
+    "page-tree-id": "node",
+    "page_tree_id": "node",
+    "pid": "node",
+    "eid": "entry",
+}
+_MIN_REAL_ID = 16
+"""LabArchives' IDs are long base64 strings. Shorter values (``0`` for the top
+level, the fake server's IDs, an ID already replaced) are left alone."""
+# Notebook, folder, and page names, and what a name the script didn't create becomes.
+_NAMES = {"name": "Notebook", "display-text": "Item"}
+_NAME_PARAM = "display_text"
+"""The request parameter that names a folder or page the script creates."""
+_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}([T ])\d{2}([:_.])\d{2}\2\d{2}(Z?)")
+
+
+def _element(tags: Mapping[str, str] | Sequence[str]) -> re.Pattern[str]:
+    """Matches an element with one of ``tags`` and some text: tag, attributes, text."""
+    return re.compile(rf"<({'|'.join(map(re.escape, tags))})(\s[^>]*)?>([^<]+)</\1>")
+
+
+_PERSONAL_ELEMENT = _element(_PERSONAL)
+_ID_ELEMENT = _element([tag for tag in _ID_KINDS if "_" not in tag])
+_NAME_ELEMENT = _element(_NAMES)
 
 
 def _api_name(url: str) -> str:
@@ -63,12 +123,71 @@ def _redact_text(text: str, secrets: set[str]) -> str:
     return _EMAIL.sub("user@example.org", text)
 
 
-def _interaction(response: requests.Response, secrets: set[str]) -> dict[str, Any]:
+def _fake_time(match: re.Match[str]) -> str:
+    separator = match[2]
+    return f"2026-01-01{match[1]}00{separator}00{separator}00{match[3]}"
+
+
+def anonymize(interactions: list[dict[str, Any]]) -> None:
+    """Replace every value that came from the account with a fake one, in place.
+
+    The same ID or name gets the same fake value everywhere, so a cassette
+    still reads as one run. Doing it twice changes nothing more.
+    """
+    # 1. IDs, numbered by kind in the order they first appear. An ID also
+    #    appears inside captions and file names, so replace it in every string.
+    ids: dict[str, str] = {}
+    counts: dict[str, int] = {}
+
+    def see(key: str, value: str) -> None:
+        if len(value) >= _MIN_REAL_ID and value not in ids and value != REDACTED:
+            kind = _ID_KINDS[key]
+            counts[kind] = counts.get(kind, 0) + 1
+            ids[value] = f"{kind}-{counts[kind]}"
+
+    for interaction in interactions:
+        for key, value in interaction["params"].items():
+            if key in _ID_KINDS:
+                see(key, value)
+        for match in _ID_ELEMENT.finditer(interaction["body"]):
+            see(match[1], unescape(match[3]))
+
+    def everywhere(text: str) -> str:
+        for real in sorted(ids, key=len, reverse=True):
+            text = text.replace(real, ids[real])
+        return _TIMESTAMP.sub(_fake_time, text)
+
+    for interaction in interactions:
+        interaction["params"] = {k: everywhere(v) for k, v in interaction["params"].items()}
+        interaction["body"] = everywhere(interaction["body"])
+        interaction["content_disposition"] = everywhere(interaction["content_disposition"])
+
+    # 2. The person, and the names the script did not create.
+    own_names = {i["params"][_NAME_PARAM] for i in interactions if _NAME_PARAM in i["params"]}
+    names: dict[tuple[str, str], str] = {}
+
+    def name(match: re.Match[str]) -> str:
+        tag, text = match[1], unescape(match[3])
+        label = _NAMES[tag]
+        if text in own_names or text == REDACTED or re.fullmatch(rf"{label} \d+", text):
+            return match[0]
+        fake = names.setdefault((tag, text), f"{label} {len(names) + 1}")
+        return f"<{tag}{match[2] or ''}>{fake}</{tag}>"
+
+    for interaction in interactions:
+        body = _PERSONAL_ELEMENT.sub(
+            lambda m: f"<{m[1]}{m[2] or ''}>{_PERSONAL[m[1]]}</{m[1]}>", interaction["body"]
+        )
+        interaction["body"] = _NAME_ELEMENT.sub(name, body)
+
+
+def _interaction(response: requests.Response) -> dict[str, Any]:
+    """One call. The body is not redacted yet: ``record_http`` does that at the end."""
     request = response.request
     content_type = response.headers.get("Content-Type", "")
     is_xml = "xml" in content_type or response.content.lstrip().startswith(b"<")
     if is_xml and "entry_attachment" not in (request.url or ""):
-        body = _redact_text(response.content.decode(errors="replace"), secrets)
+        body = response.content.decode(errors="replace")
     else:
         body = f"<{len(response.content)} bytes>"
     return {
@@ -100,7 +219,7 @@ def record_http(path: str | Path) -> Iterator[list[dict[str, Any]]]:
                 uid = ElementTree.fromstring(response.content).findtext("./id")
                 if uid:
                     secrets.add(uid)
-        interactions.append(_interaction(response, secrets))
+        interactions.append(_interaction(response))
         return response
 
     requests.Session.send = send  # type: ignore[method-assign]
@@ -108,11 +227,26 @@ def record_http(path: str | Path) -> Iterator[list[dict[str, Any]]]:
         yield interactions
     finally:
         requests.Session.send = original  # type: ignore[method-assign]
-        # Redact again: a secret learned late may appear in an earlier body.
-        for interaction in interactions:
-            interaction["body"] = _redact_text(interaction["body"], secrets)
-        document = {"version": CASSETTE_VERSION, "interactions": interactions}
-        Path(path).write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
+        # At the end: a secret learned late may appear in an earlier body,
+        # and a folder may be listed before the call that names it.
+        _write(path, interactions, secrets)
+
+
+def _write(path: str | Path, interactions: list[dict[str, Any]], secrets: set[str]) -> None:
+    for interaction in interactions:
+        interaction["body"] = _redact_text(interaction["body"], secrets)
+    anonymize(interactions)
+    document = {"version": CASSETTE_VERSION, "interactions": interactions}
+    Path(path).write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
+
+
+def anonymize_cassette(path: str | Path) -> None:
+    """Replace the real values in the cassette at ``path`` with fake ones, in place.
+
+    For a cassette recorded before a rule was added. It can't find a secret
+    the recording missed by value (the user ID, say), only by element.
+    """
+    _write(path, [dict(interaction) for interaction in load_cassette(path)], set())
 
 
 def load_cassette(path: str | Path) -> list[dict[str, Any]]:
@@ -155,7 +289,9 @@ def error_codes(interactions: list[Mapping[str, Any]]) -> dict[str, set[str]]:
         if interaction["status"] == 200 or not interaction["body"].lstrip().startswith("<"):
             continue
         try:
-            code = ElementTree.fromstring(interaction["body"].encode()).findtext("error-code")
+            # At any depth, as labapi reads it: LabArchives nests the error
+            # inside the API class's root (<tree-tools><error><error-code>).
+            code = ElementTree.fromstring(interaction["body"].encode()).findtext(".//error-code")
         except ElementTree.ParseError:
             continue
         if code:
@@ -197,3 +333,19 @@ def compare_shapes(*, live: Mapping[str, set[str]], fake: Mapping[str, set[str]]
         for path in sorted(fake[api] - live[api]):
             differences.append(f"{api}: the fake sends {path}; LabArchives does not.")
     return differences
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m metarelay.testing.labarchives_cassettes",
+        description="Replace the real values in a recorded cassette with fake ones, in place.",
+    )
+    parser.add_argument("cassette", type=Path, nargs="+", help="a cassette file")
+    for path in parser.parse_args(argv).cassette:
+        anonymize_cassette(path)
+        print(f"Anonymized {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
