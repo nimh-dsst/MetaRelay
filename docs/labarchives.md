@@ -173,8 +173,11 @@ Review the cassette anyway, then add it to
 and fails wherever the fake sends something LabArchives doesn't, or answers
 the deliberate missing-folder request with a different error code.
 
-Add `--check-edits` to also edit a preview by hand when it pauses, which
-checks that MetaRelay refuses to overwrite edits made in LabArchives. The run
+Add `--check-edits` to also edit a preview by hand when it pauses: change the
+label `second` to `edited`, and nothing else. It checks that MetaRelay
+refuses to overwrite the edit, that the conflict names exactly that change,
+and that accepting it copies it into the record. LabArchives rewrites stored
+HTML, so this is the check that reading edits works on the real thing. The run
 also reports whether LabArchives keeps HTML comments in entries. MetaRelay
 finds a record's preview through the attachment's caption, so it works either
 way; the comment is only a fallback.
