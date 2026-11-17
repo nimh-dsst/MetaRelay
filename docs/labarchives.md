@@ -158,6 +158,8 @@ afterwards; `labapi` cannot delete) and saves the traffic as a cassette. A
 cassette holds no real data: recording redacts secrets and replaces IDs,
 timestamps, your name, ORCID, and IP address, share links, and the name of
 every notebook, folder, and page the script did not create with fake values.
+If LabArchives sends an element the recorder has no rule for, it writes no
+cassette and names the element, so nothing passes through unchecked.
 Review the cassette anyway, then add it to
 `tests/cassettes/labarchives/`. The test suite compares it with the fake
 and fails wherever the fake sends something LabArchives doesn't, or answers

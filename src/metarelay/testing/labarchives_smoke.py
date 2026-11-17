@@ -61,7 +61,7 @@ from metarelay.core.errors import ConflictError, MetaRelayError, ValidationError
 from metarelay.core.path import ROOT, LogicalPath
 from metarelay.core.record import Record
 from metarelay.core.session import Session
-from metarelay.testing.labarchives_cassettes import record_http
+from metarelay.testing.labarchives_cassettes import CassetteLeakError, record_http
 
 __all__ = ["SMOKE_SCHEMA_ID", "main", "run_smoke"]
 
@@ -312,6 +312,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_smoke(session, args.notebook, pause=pause)
     except (MetaRelayError, SmokeFailure) as error:
         print(f"Smoke test failed: {error}", file=sys.stderr)
+        return 1
+    except CassetteLeakError as error:
+        print(error, file=sys.stderr)
         return 1
     return 0
 

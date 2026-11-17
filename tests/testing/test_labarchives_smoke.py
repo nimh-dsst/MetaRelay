@@ -6,7 +6,6 @@ captured cassette with the fake's answers shows where the fake is wrong.
 """
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -21,11 +20,12 @@ from metarelay.testing.labarchives_cassettes import (
     compare_error_codes,
     compare_shapes,
     error_codes,
+    leaks,
     load_cassette,
     xml_shapes,
 )
 from metarelay.testing.labarchives_cassettes import main as cassettes_main
-from metarelay.testing.labarchives_smoke import main
+from metarelay.testing.labarchives_smoke import MISSING_TREE_ID, main
 
 AKID, AKPASS = "smoke-akid", "smoke-akpass-secret"
 EMAIL, CODE = "ada@example.org", "auth-code-secret"
@@ -268,16 +268,13 @@ def test_fake_error_codes_match_captured_cassettes(cassette: Path, tmp_path: Pat
 
 @pytest.mark.parametrize("cassette", CASSETTES, ids=lambda path: path.stem)
 def test_committed_cassettes_hold_only_fake_data(cassette: Path) -> None:
-    """Replacing the real values in a committed cassette must change nothing."""
+    """Every element, attribute, and parameter is on a list, and holds its fake value."""
     interactions = load_cassette(cassette)
+    assert leaks(interactions) == []
+
     again = json.loads(json.dumps(interactions))
     anonymize(again)
-    assert again == interactions
-
-    text = cassette.read_text()
-    addresses = set(re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text))
-    assert addresses <= {"192.0.2.1"}  # the documentation range, never a real address
-    assert set(re.findall(r"https?://[^/\s\"<]+", text)) <= {"https://labarchives.example"}
+    assert again == interactions  # nothing was left to replace
 
 
 # The dev stack's seed
@@ -342,8 +339,8 @@ def test_anonymize_keeps_only_the_names_the_script_created() -> None:
     assert listed["body"] == (
         "<users><notebook><name>Notebook 1</name></notebook>"
         "<level-node><display-text>Smoke &amp; tests</display-text></level-node>"
-        "<level-node><display-text>Item 2</display-text></level-node>"
-        "<level-node><display-text>Item 2</display-text></level-node></users>"
+        "<level-node><display-text>Item 1</display-text></level-node>"
+        "<level-node><display-text>Item 1</display-text></level-node></users>"
     )
 
 
@@ -377,6 +374,125 @@ def test_anonymize_gives_an_id_the_same_fake_value_everywhere() -> None:
     again = json.loads(json.dumps(calls))
     anonymize(again)
     assert again == calls  # doing it twice changes nothing more
+
+
+def test_anonymize_replaces_a_short_id_where_it_is_the_whole_value() -> None:
+    call = one_call(
+        "<tree-tools><tree-id>MTIzNDU2Nzg5</tree-id><caption>size MTIzNDU2Nzg5</caption>"
+        f"<parent-tree-id>0</parent-tree-id><pid>{MISSING_TREE_ID}</pid></tree-tools>",
+        tree_id="MTIzNDU2Nzg5",
+    )
+    anonymize([call])
+    assert call["params"] == {"tree_id": "node-1"}
+    # Not inside other text: a short ID could be part of an unrelated word.
+    assert call["body"] == (
+        "<tree-tools><tree-id>node-1</tree-id><caption>size MTIzNDU2Nzg5</caption>"
+        f"<parent-tree-id>0</parent-tree-id><pid>{MISSING_TREE_ID}</pid></tree-tools>"
+    )
+    assert leaks([call]) == []
+
+
+def test_anonymize_skips_numbers_that_are_already_taken() -> None:
+    call = one_call(
+        "<t><display-text>Secret project</display-text><display-text>Item 1</display-text>"
+        "<tree-id>VHJlZU5vZGUvOTg3NjU0MzIx</tree-id><tree-id>node-1</tree-id></t>"
+    )
+    anonymize([call])
+    assert call["body"] == (
+        "<t><display-text>Item 2</display-text><display-text>Item 1</display-text>"
+        "<tree-id>node-2</tree-id><tree-id>node-1</tree-id></t>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("real", "fake"),
+    [
+        ("2026-11-16T14:03:22Z", "2026-01-01T00:00:00Z"),
+        ("2026-11-16T14:03:22-05:00", "2026-01-01T00:00:00Z"),  # not the recorder's offset
+        ("2026-11-16T14:03:22.123Z", "2026-01-01T00:00:00Z"),
+        ("2026-11-16T14:03:22.123456+0530", "2026-01-01T00:00:00Z"),
+        ("run 2026-11-16 14.46.21", "run 2026-01-01 00.00.00"),
+        ("uploaded=2026-11-16T19_46_45Z.json", "uploaded=2026-01-01T00_00_00Z.json"),
+    ],
+)
+def test_anonymize_replaces_the_whole_timestamp(real: str, fake: str) -> None:
+    call = one_call(f"<e><caption>{real}</caption></e>")
+    anonymize([call])
+    assert call["body"] == f"<e><caption>{fake}</caption></e>"
+    assert leaks([call]) == []
+
+
+# What anonymize() does not know about must be reported, not passed through.
+
+
+@pytest.mark.parametrize(
+    ("body", "leak"),
+    [
+        (
+            "<users><institution>NIMH Section on X</institution></users>",
+            "the element <institution> is not on a list",
+        ),
+        (
+            "<users><signature-name>Jane Q</signature-name></users>",
+            "the element <signature-name> is not on a list",
+        ),
+        (
+            '<users><notebook name="Grant drafts"/></users>',
+            "the attribute 'name' on <notebook> is not on a list",
+        ),
+        ("<users><notebook/>Jane Q</users>", "there is text after <notebook>"),
+        ("<users><caption>10.1.2.3</caption></users>", "an IP address (10.1.2.3)"),
+        (
+            "<users><caption>https://real.example.org/share/x</caption></users>",
+            "a link (https://real.example.org)",
+        ),
+        ("<users><oops></users>", "the response is not XML, so it can't be checked"),
+    ],
+)
+def test_leaks_reports_what_no_list_covers(body: str, leak: str) -> None:
+    call = one_call(body)
+    anonymize([call])
+    assert leaks([call]) == [f"tree_tools/get_tree_level: {leak}"]
+
+
+def test_leaks_reports_a_listed_value_that_is_still_real() -> None:
+    call = one_call(
+        "<users><fullname>Ada Lovelace</fullname><name>Grant drafts</name>"
+        "<tree-id>VHJlZU5vZGUvOTg3NjU0MzIx</tree-id><uid>12345</uid>"
+        "<created-at>2026-11-16T14:03:22-05:00</created-at></users>",
+        nbid="Tm90ZWJvb2svMTIzNDU2Nzg5",
+        uid="12345",
+        client_ip="203.0.113.7",
+    )
+    assert leaks([call]) == [
+        "tree_tools/get_tree_level: the parameter 'nbid' holds a real value",
+        "tree_tools/get_tree_level: the parameter 'uid' holds a real value",
+        "tree_tools/get_tree_level: the parameter 'client_ip' is not on a list",
+        "tree_tools/get_tree_level: a real timestamp (2026-11-16T14:03:22-05:00)",
+        "tree_tools/get_tree_level: <fullname> holds a real value",
+        "tree_tools/get_tree_level: <name> holds a real value",
+        "tree_tools/get_tree_level: <tree-id> holds a real value",
+        "tree_tools/get_tree_level: <uid> holds a real value",
+        "tree_tools/get_tree_level: <created-at> holds a real value",
+    ]
+
+
+def test_a_cassette_that_could_hold_real_data_is_not_written(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "old.json"
+    call = one_call("<users><institution>NIMH Section on X</institution></users>")
+    before = json.dumps({"version": 1, "interactions": [call]})
+    path.write_text(before)
+
+    assert cassettes_main([str(path)]) == 1
+
+    assert path.read_text() == before
+    err = capsys.readouterr().err
+    assert "the element <institution> is not on a list" in err
+    assert "NIMH" not in err  # the report names the element, not what it holds
+
+
+def test_the_fake_sends_nothing_the_lists_do_not_cover(tmp_path: Path) -> None:
+    assert leaks(load_cassette(fake_cassette(tmp_path))) == []
 
 
 def test_recording_keeps_the_folders_the_smoke_script_made(base_url: str, tmp_path: Path) -> None:

@@ -17,8 +17,14 @@ code, the user ID, and email addresses), then replaces every other value
 that came from the account with a fake one: IDs, timestamps, the person's
 name, ORCID, and IP address, share links, and the name of every notebook,
 folder, and page the script did not create itself. Attachment downloads are
-stored by size only. What stays is the shape of each response and what the
-smoke script wrote. Still review a cassette before committing it.
+stored by size only. What stays is the shape of each response, LabArchives'
+own fixed values, and what the smoke script wrote.
+
+This fails closed. Every element, attribute, and request parameter has to be
+on a list below that says what it holds. ``leaks`` reports anything that is
+not, and any listed value that is still real, and recording refuses to write
+a cassette that has one. When LabArchives sends something new, add it to the
+right list. Still review a cassette before committing it.
 
 To replace the values in a cassette recorded before these rules::
 
@@ -31,6 +37,7 @@ import argparse
 import contextlib
 import json
 import re
+import sys
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -41,9 +48,11 @@ from xml.sax.saxutils import unescape
 import requests
 
 __all__ = [
+    "CassetteLeakError",
     "anonymize",
     "anonymize_cassette",
     "compare_shapes",
+    "leaks",
     "load_cassette",
     "record_http",
     "xml_shapes",
@@ -51,11 +60,31 @@ __all__ = [
 
 CASSETTE_VERSION = 1
 REDACTED = "REDACTED"
+
+
+class CassetteLeakError(ValueError):
+    """A cassette was not written, because it could hold real data."""
+
+
+_FAKE_EMAIL = "user@example.org"
+_FAKE_TIME = "2026-01-01T00:00:00Z"
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
+
+# What each request parameter holds. A parameter on no list is a leak.
 _SECRET_PARAMS = frozenset(
     {"akid", "sig", "expires", "password", "login_or_email", "uid", "email", "auth_code"}
 )
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
-# Elements that identify the person or their network, and the fake value each gets.
+_NAME_PARAM = "display_text"
+"""Names a folder or page the script creates."""
+_WRITTEN_PARAMS = frozenset(
+    {"caption", "change_description", "filename", "entry_data", "is_folder", "part_type"}
+)
+"""What the script wrote, and LabArchives' own fixed values."""
+
+# What each element holds. An element with text that is on no list is a leak.
+_SECRET = frozenset({"akid", "sig", "expires", "uid", "password", "login-or-email", "email"})
+"""Always redacted, also when the value was not seen as a request parameter."""
+# Elements that identify the person, their network, or the time, and the fake value each gets.
 _PERSONAL = {
     "fullname": "Demo User",
     "first-name": "Demo",
@@ -67,6 +96,8 @@ _PERSONAL = {
     "suborganization": "Demo lab",
     "entry-url": "https://labarchives.example/share/entry",
     "nginx-call-start": "0.000",
+    "created-at": _FAKE_TIME,
+    "updated-at": _FAKE_TIME,
 }
 # Elements and request parameters that hold an ID, and the kind of thing it names.
 _ID_KINDS = {
@@ -81,14 +112,62 @@ _ID_KINDS = {
     "pid": "node",
     "eid": "entry",
 }
-_MIN_REAL_ID = 16
-"""LabArchives' IDs are long base64 strings. Shorter values (``0`` for the top
-level, the fake server's IDs, an ID already replaced) are left alone."""
+_FIXED_IDS = frozenset({"0", "999999999", REDACTED})
+"""IDs that name nothing real: the top level, the smoke script's missing folder."""
+_FAKE_ID = re.compile(r"(?:notebook|node|entry)-\d+")
+_MIN_ID_IN_TEXT = 16
+"""An ID is always replaced where it is an element's or a parameter's whole
+value. It also appears inside captions and file names. There it is replaced
+only when it is this long, as LabArchives' base64 IDs are: a short ID could
+be part of an unrelated word."""
 # Notebook, folder, and page names, and what a name the script didn't create becomes.
 _NAMES = {"name": "Notebook", "display-text": "Item"}
-_NAME_PARAM = "display_text"
-"""The request parameter that names a folder or page the script creates."""
-_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}([T ])\d{2}([:_.])\d{2}\2\d{2}(Z?)")
+_FIXED = frozenset(
+    {
+        "attach-content-type",
+        "attach-file-size",
+        "can-own-notebooks",
+        "can-read",
+        "can-read-comments",
+        "can-write",
+        "can-write-comments",
+        "class",
+        "error-code",
+        "error-description",
+        "flags",
+        "is-a-researcher",
+        "is-a-student",
+        "is-a-teacher",
+        "is-default",
+        "is-folder",
+        "is-page",
+        "is-page-locked",
+        "last-modified-verb",
+        "max-file-size",
+        "method",
+        "number-comments",
+        "part-type",
+        "snapshot",
+        "thumb-info",
+        "total-returned",
+        "version",
+    }
+)
+"""LabArchives' own values: flags, counts, sizes, and fixed words."""
+_WRITTEN = frozenset(
+    {"attach-file-name", "caption", "change-description", "entry-data", "filename"}
+)
+"""What the smoke script wrote. It only reads entries on pages it created."""
+_ATTRIBUTES = frozenset({"type", "nil"})
+"""The attributes LabArchives puts on elements: a data type, or that there is no value."""
+
+# A timestamp, with any fraction of a second and any timezone.
+_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}([T ])\d{2}([:_.])\d{2}\2\d{2}(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?"
+)
+_IP_ADDRESS = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+_LINK = re.compile(r"https?://[^/\s\"<]+")
+_SIZE_ONLY = re.compile(r"<\d+ bytes>")
 
 
 def _element(tags: Mapping[str, str] | Sequence[str]) -> re.Pattern[str]:
@@ -96,6 +175,7 @@ def _element(tags: Mapping[str, str] | Sequence[str]) -> re.Pattern[str]:
     return re.compile(rf"<({'|'.join(map(re.escape, tags))})(\s[^>]*)?>([^<]+)</\1>")
 
 
+_SECRET_ELEMENT = _element(sorted(_SECRET))
 _PERSONAL_ELEMENT = _element(_PERSONAL)
 _ID_ELEMENT = _element([tag for tag in _ID_KINDS if "_" not in tag])
 _NAME_ELEMENT = _element(_NAMES)
@@ -125,25 +205,56 @@ def _redact_text(text: str, secrets: set[str]) -> str:
 
 def _fake_time(match: re.Match[str]) -> str:
     separator = match[2]
-    return f"2026-01-01{match[1]}00{separator}00{separator}00{match[3]}"
+    zone = "Z" if match[3] else ""  # never the recorder's own offset
+    return f"2026-01-01{match[1]}00{separator}00{separator}00{zone}"
+
+
+def _is_fake_id(value: str) -> bool:
+    return value in _FIXED_IDS or _FAKE_ID.fullmatch(value) is not None
+
+
+def _is_fake_name(tag: str, text: str) -> bool:
+    return text == REDACTED or re.fullmatch(rf"{_NAMES[tag]} \d+", text) is not None
+
+
+def _own_names(interactions: Sequence[Mapping[str, Any]]) -> set[str]:
+    return {i["params"][_NAME_PARAM] for i in interactions if _NAME_PARAM in i["params"]}
+
+
+def _next_free(label: str, taken: set[str]) -> str:
+    """The first ``label`` + number that nothing in the cassette is called yet."""
+    number = 1
+    while f"{label}{number}" in taken:
+        number += 1
+    taken.add(f"{label}{number}")
+    return f"{label}{number}"
 
 
 def anonymize(interactions: list[dict[str, Any]]) -> None:
     """Replace every value that came from the account with a fake one, in place.
 
     The same ID or name gets the same fake value everywhere, so a cassette
-    still reads as one run. Doing it twice changes nothing more.
+    still reads as one run. Doing it twice changes nothing more. It handles
+    only what the lists above name: check the result with ``leaks``.
     """
-    # 1. IDs, numbered by kind in the order they first appear. An ID also
-    #    appears inside captions and file names, so replace it in every string.
+
+    def swap(pattern: re.Pattern[str], value: Any, text: str) -> str:
+        """Give each element ``pattern`` matches the text ``value`` returns for it."""
+        return pattern.sub(lambda m: f"<{m[1]}{m[2] or ''}>{value(m)}</{m[1]}>", text)
+
+    # 1. IDs, numbered by kind in the order they first appear, skipping any
+    #    number a fake ID in the cassette already has.
     ids: dict[str, str] = {}
-    counts: dict[str, int] = {}
+    taken = {
+        match
+        for interaction in interactions
+        for text in (*interaction["params"].values(), interaction["body"])
+        for match in _FAKE_ID.findall(text)
+    }
 
     def see(key: str, value: str) -> None:
-        if len(value) >= _MIN_REAL_ID and value not in ids and value != REDACTED:
-            kind = _ID_KINDS[key]
-            counts[kind] = counts.get(kind, 0) + 1
-            ids[value] = f"{kind}-{counts[kind]}"
+        if value not in ids and not _is_fake_id(value):
+            ids[value] = _next_free(f"{_ID_KINDS[key]}-", taken)
 
     for interaction in interactions:
         for key, value in interaction["params"].items():
@@ -151,34 +262,122 @@ def anonymize(interactions: list[dict[str, Any]]) -> None:
                 see(key, value)
         for match in _ID_ELEMENT.finditer(interaction["body"]):
             see(match[1], unescape(match[3]))
+    in_text = sorted((i for i in ids if len(i) >= _MIN_ID_IN_TEXT), key=len, reverse=True)
 
     def everywhere(text: str) -> str:
-        for real in sorted(ids, key=len, reverse=True):
+        for real in in_text:
             text = text.replace(real, ids[real])
         return _TIMESTAMP.sub(_fake_time, text)
 
     for interaction in interactions:
-        interaction["params"] = {k: everywhere(v) for k, v in interaction["params"].items()}
-        interaction["body"] = everywhere(interaction["body"])
+        interaction["params"] = {
+            key: ids.get(value, value) if key in _ID_KINDS else everywhere(value)
+            for key, value in interaction["params"].items()
+        }
+        body = swap(_ID_ELEMENT, lambda m: ids.get(unescape(m[3]), m[3]), interaction["body"])
+        interaction["body"] = everywhere(body)
         interaction["content_disposition"] = everywhere(interaction["content_disposition"])
 
-    # 2. The person, and the names the script did not create.
-    own_names = {i["params"][_NAME_PARAM] for i in interactions if _NAME_PARAM in i["params"]}
+    # 2. Secrets, the person, and the names the script did not create.
+    own_names = _own_names(interactions)
     names: dict[tuple[str, str], str] = {}
+    kept = {
+        unescape(match[3])
+        for interaction in interactions
+        for match in _NAME_ELEMENT.finditer(interaction["body"])
+    }
 
     def name(match: re.Match[str]) -> str:
         tag, text = match[1], unescape(match[3])
-        label = _NAMES[tag]
-        if text in own_names or text == REDACTED or re.fullmatch(rf"{label} \d+", text):
-            return match[0]
-        fake = names.setdefault((tag, text), f"{label} {len(names) + 1}")
-        return f"<{tag}{match[2] or ''}>{fake}</{tag}>"
+        if text in own_names or _is_fake_name(tag, text):
+            return match[3]
+        if (tag, text) not in names:
+            names[tag, text] = _next_free(f"{_NAMES[tag]} ", kept)
+        return names[tag, text]
 
     for interaction in interactions:
-        body = _PERSONAL_ELEMENT.sub(
-            lambda m: f"<{m[1]}{m[2] or ''}>{_PERSONAL[m[1]]}</{m[1]}>", interaction["body"]
-        )
-        interaction["body"] = _NAME_ELEMENT.sub(name, body)
+        body = swap(_SECRET_ELEMENT, lambda m: REDACTED, interaction["body"])
+        body = swap(_PERSONAL_ELEMENT, lambda m: _PERSONAL[m[1]], body)
+        interaction["body"] = _EMAIL.sub(_FAKE_EMAIL, swap(_NAME_ELEMENT, name, body))
+
+
+def leaks(interactions: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Everything in a cassette that is, or could be, real data. Empty when there is none.
+
+    It reports a request parameter, element, or attribute that no list above
+    covers, and a listed value that is not the fake one. So a response field
+    LabArchives adds later is reported until someone says what it holds.
+    """
+    own_names = _own_names(interactions)
+    found: dict[str, None] = {}  # in order, without repeats
+
+    def leak(interaction: Mapping[str, Any], what: str) -> None:
+        found[f"{interaction['api']}: {what}"] = None
+
+    def check_text(interaction: Mapping[str, Any], text: str) -> None:
+        for match in _TIMESTAMP.finditer(text):
+            if _fake_time(match) != match[0]:
+                leak(interaction, f"a real timestamp ({match[0]})")
+        for address in _IP_ADDRESS.findall(text):
+            if address != _PERSONAL["last-modified-ip"]:
+                leak(interaction, f"an IP address ({address})")
+        for link in _LINK.findall(text):
+            if link != "https://labarchives.example":
+                leak(interaction, f"a link ({link})")
+        for match in _EMAIL.finditer(text):
+            if match[0] != _FAKE_EMAIL:
+                leak(interaction, "an email address")
+
+    def check_element(interaction: Mapping[str, Any], element: ElementTree.Element) -> None:
+        tag, text = element.tag, (element.text or "").strip()
+        for attribute in element.attrib:
+            if attribute not in _ATTRIBUTES:
+                leak(interaction, f"the attribute {attribute!r} on <{tag}> is not on a list")
+        if (element.tail or "").strip():
+            leak(interaction, f"there is text after <{tag}>")
+        if not text or tag in _FIXED or tag in _WRITTEN:
+            return
+        if tag in _SECRET:
+            fake = text in (REDACTED, _FAKE_EMAIL)
+        elif tag in _PERSONAL:
+            fake = text == _PERSONAL[tag]
+        elif tag in _ID_KINDS:
+            fake = _is_fake_id(text)
+        elif tag in _NAMES:
+            fake = text in own_names or _is_fake_name(tag, text)
+        else:
+            leak(interaction, f"the element <{tag}> is not on a list")
+            return
+        if not fake:
+            leak(interaction, f"<{tag}> holds a real value")
+
+    for interaction in interactions:
+        for key, value in interaction["params"].items():
+            if key in _SECRET_PARAMS:
+                fake = value in ("", REDACTED)
+            elif key in _ID_KINDS:
+                fake = _is_fake_id(value)
+            elif key == _NAME_PARAM or key in _WRITTEN_PARAMS:
+                fake = True
+            else:
+                leak(interaction, f"the parameter {key!r} is not on a list")
+                continue
+            if not fake:
+                leak(interaction, f"the parameter {key!r} holds a real value")
+            check_text(interaction, value)
+        check_text(interaction, interaction["content_disposition"])
+        body = interaction["body"]
+        check_text(interaction, body)
+        if not body or _SIZE_ONLY.fullmatch(body):
+            continue
+        try:
+            root = ElementTree.fromstring(body.encode())
+        except ElementTree.ParseError:
+            leak(interaction, "the response is not XML, so it can't be checked")
+            continue
+        for element in root.iter():
+            check_element(interaction, element)
+    return list(found)
 
 
 def _interaction(response: requests.Response) -> dict[str, Any]:
@@ -236,6 +435,13 @@ def _write(path: str | Path, interactions: list[dict[str, Any]], secrets: set[st
     for interaction in interactions:
         interaction["body"] = _redact_text(interaction["body"], secrets)
     anonymize(interactions)
+    problems = leaks(interactions)
+    if problems:
+        raise CassetteLeakError(
+            f"Not writing {path}: it could hold real data. Say what each of these holds "
+            "in metarelay/testing/labarchives_cassettes.py, then try again:\n  "
+            + "\n  ".join(problems)
+        )
     document = {"version": CASSETTE_VERSION, "interactions": interactions}
     Path(path).write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
 
@@ -342,7 +548,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("cassette", type=Path, nargs="+", help="a cassette file")
     for path in parser.parse_args(argv).cassette:
-        anonymize_cassette(path)
+        try:
+            anonymize_cassette(path)
+        except CassetteLeakError as error:
+            print(error, file=sys.stderr)
+            return 1
         print(f"Anonymized {path}")
     return 0
 
