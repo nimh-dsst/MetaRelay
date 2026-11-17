@@ -176,8 +176,8 @@ def _edited(
     return ConflictError(
         f"{what} "
         + (diff.describe(writing=writing) + " " if diff is not None else "")
-        + "To keep the edit, copy it into the record first. Then write again with "
-        f"mode='force'{force}",
+        + "To keep the edit, pass error.preview_diff to accept_edits(), or copy it into "
+        f"the record first. Then write again with mode='force'{force}",
         preview_diff=diff,
     )
 
