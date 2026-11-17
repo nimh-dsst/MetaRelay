@@ -26,7 +26,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-labarchives = ["labapi>=1.0.3,<2"]
+# 1.2.0 is the first labapi that reads the error code LabArchives nests inside
+# the API class root. Without it a bad login is not an authentication error.
+labarchives = ["labapi>=1.2.0,<2"]
 elabftw = ["elabapi-python>=5,<7"]
 github = ["httpx>=0.28,<1"]
 nwb = [

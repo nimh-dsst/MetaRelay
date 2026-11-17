@@ -669,7 +669,7 @@ dev = [
 requires-dist = [
     { name = "elabapi-python", marker = "extra == 'elabftw'", specifier = ">=5,<7" },
     { name = "httpx", marker = "extra == 'github'", specifier = ">=0.28,<1" },
-    { name = "labapi", marker = "extra == 'labarchives'", specifier = ">=1.0.3,<2" },
+    { name = "labapi", marker = "extra == 'labarchives'", specifier = ">=1.2.0,<2" },
     { name = "metarelay", extras = ["labarchives", "elabftw", "github", "nwb", "testing"], marker = "extra == 'all'" },
     { name = "ndx-fiber-photometry", marker = "extra == 'nwb'", specifier = ">=0.2.3,<0.3" },
     { name = "ndx-microscopy", marker = "extra == 'nwb'", specifier = ">=0.4,<0.5" },

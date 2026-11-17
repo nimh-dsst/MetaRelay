@@ -68,13 +68,11 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import mimetypes
-import re
 import unicodedata
 from collections.abc import Iterator, Mapping
 from io import BytesIO
 from typing import Any
 from urllib.parse import urlsplit
-from xml.sax.saxutils import unescape
 
 import labapi
 import requests
@@ -193,9 +191,8 @@ def _check_destination(destination: Destination) -> None:
         )
 
 
-# The LabArchives error codes that mean the credentials or the session are bad.
-_AUTH_CODES = frozenset({4506, 4514, 4520, 4533})
-# Other LabArchives error codes that mean more than "could not".
+# LabArchives error codes that mean more than "could not". Codes labapi turns
+# into labapi.AuthenticationError (4506, 4514, 4520, 4533) never get here.
 # The smoke script's deliberate bad-ID call captured 4999 ("your request
 # contained bad information") from real LabArchives. That is a general code,
 # so it is not mapped to NotFoundError: MetaRelay finds things by name and
@@ -203,33 +200,6 @@ _AUTH_CODES = frozenset({4506, 4514, 4520, 4533})
 _ERROR_CODES: dict[int, type[MetaRelayError]] = {
     4547: PermissionDeniedError,  # not the notebook owner (documented by labapi)
 }
-
-
-_ERROR_IN_MESSAGE = re.compile(
-    r"<error-code[^>]*>\s*(\d+)\s*</error-code>"
-    r"(?:\s*<error-description[^>]*>([^<]*)</error-description>)?"
-)
-
-
-def _error_code(error: labapi.LabArchivesError) -> tuple[int | None, str]:
-    """The LabArchives error code in ``error``, and what is safe to say about it.
-
-    LabArchives puts the error inside the API class's root element
-    (``<tree-tools><error><error-code>``). ``labapi`` before 1.2.0 looks only
-    at the top of the response, so it finds no code and quotes the whole
-    response in its message instead. The code is read from there, so the
-    floor version (which Chronoxiv pins) translates errors the same way.
-
-    Only the code and LabArchives' description are returned: the rest of the
-    message can hold the signed request URL.
-    """
-    code = getattr(error, "error_code", None)
-    if code is not None:
-        return code, f": {error}"
-    found = _ERROR_IN_MESSAGE.search(str(error))
-    if found is None:
-        return None, "."
-    return int(found[1]), f": [{found[1]}] {unescape(found[2] or '').strip()}"
 
 
 @contextlib.contextmanager
@@ -244,13 +214,14 @@ def _labarchives_errors(action: str) -> Iterator[None]:
         yield
     except MetaRelayError:
         raise
-    except (labapi.AuthenticationError, labapi.ApiError) as error:
-        code, detail = _error_code(error)
-        if isinstance(error, labapi.AuthenticationError) or code in _AUTH_CODES:
-            raise AuthenticationError(
-                f"LabArchives rejected the credentials while trying to {action}{detail}"
-            ) from None
-        error_class = _ERROR_CODES.get(code, BackendUnavailableError)
+    except labapi.AuthenticationError as error:
+        detail = f": {error}" if error.error_code is not None else "."
+        raise AuthenticationError(
+            f"LabArchives rejected the credentials while trying to {action}{detail}"
+        ) from None
+    except labapi.ApiError as error:
+        detail = f": {error}" if error.error_code is not None else "."
+        error_class = _ERROR_CODES.get(error.error_code, BackendUnavailableError)
         raise error_class(f"LabArchives could not {action}{detail}") from None
     except (labapi.LabArchivesError, XMLSyntaxError):
         raise BackendUnavailableError(
@@ -270,11 +241,9 @@ def _is_container(node: Any) -> bool:
 def _escape_name(name: str) -> str:
     r"""``name`` as labapi needs it to create a node with exactly that name.
 
-    labapi 1.2 reads ``\`` and ``/`` in a name as path escapes, so they are
-    escaped; labapi 1.0.3 has no escapes and takes the name as it is.
+    labapi reads ``\`` and ``/`` in a name as path escapes, so they are escaped.
     """
-    escape = getattr(labapi.NotebookPath, "escape", None)
-    return escape(name)[0] if escape is not None else name
+    return labapi.NotebookPath.escape(name)[0]
 
 
 def _addressable(name: str) -> bool:

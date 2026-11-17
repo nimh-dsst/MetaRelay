@@ -68,9 +68,9 @@ jobs:
       - name: Test with all extras
         run: uv run --locked pytest
 
-      # pyproject allows labapi>=1.0.3, and Chronoxiv pins 1.0.3, so test the floor too.
+      # pyproject allows labapi>=1.2.0, so test the floor too. The lock moves on.
       - name: Test the LabArchives backend with the oldest supported labapi
-        run: uv run --locked --with "labapi==1.0.3" pytest tests/backends/test_labarchives.py tests/testing tests/examples
+        run: uv run --locked --with "labapi==1.2.0" pytest tests/backends/test_labarchives.py tests/testing tests/examples
 
   build:
     runs-on: ubuntu-latest

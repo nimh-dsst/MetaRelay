@@ -42,7 +42,6 @@ from metarelay.backends.labarchives import (
     RECORDS_PAGE,
     LabArchivesConfig,
     LabArchivesSession,
-    _error_code,
 )
 
 AKID, AKPASS = "test-akid", "test-akpass"
@@ -230,29 +229,6 @@ def test_unrecognized_error_code_is_unavailable(
     assert caught.value.__cause__ is None
     # The failure was one call only.
     assert session.ensure_container(STUDY / "Cohort A").path == STUDY / "Cohort A"
-
-
-def test_error_code_is_read_from_the_message_of_an_older_labapi() -> None:
-    import labapi
-
-    # labapi before 1.2.0 finds no code inside the class root, and quotes the
-    # signed URL and the whole response in its message instead.
-    error = labapi.ApiError(
-        "API request failed with status code 400 for URL "
-        "https://api.example.org/api/tree_tools/get_tree_level?akid=A&sig=SECRET "
-        '<?xml version="1.0"?><tree-tools><error><error-code type="integer">4999</error-code>'
-        "<error-description>your request contained bad information</error-description></error>"
-        "<request><sig>SECRET</sig></request></tree-tools>"
-    )
-    assert error.error_code is None
-    assert _error_code(error) == (4999, ": [4999] your request contained bad information")
-
-
-def test_error_without_a_code_says_nothing_from_the_message() -> None:
-    import labapi
-
-    error = labapi.ApiError("API request failed for URL https://api.example.org/?sig=SECRET")
-    assert _error_code(error) == (None, ".")
 
 
 # How a LogicalPath maps onto the notebook
