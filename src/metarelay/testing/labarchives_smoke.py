@@ -312,6 +312,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_smoke(session, args.notebook, pause=pause)
     except (MetaRelayError, SmokeFailure) as error:
         print(f"Smoke test failed: {error}", file=sys.stderr)
+        # A cassette that could not be written is attached as a note.
+        for note in getattr(error, "__notes__", ()):
+            print(note, file=sys.stderr)
         return 1
     except CassetteLeakError as error:
         print(error, file=sys.stderr)

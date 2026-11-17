@@ -15,6 +15,7 @@ from metarelay.testing.labarchives_fake import FakeLabArchives, serve_fake
 pytest.importorskip("labapi")
 
 from metarelay.testing.labarchives_cassettes import (
+    CassetteLeakError,
     _redact_text,
     anonymize,
     compare_error_codes,
@@ -22,10 +23,11 @@ from metarelay.testing.labarchives_cassettes import (
     error_codes,
     leaks,
     load_cassette,
+    record_http,
     xml_shapes,
 )
 from metarelay.testing.labarchives_cassettes import main as cassettes_main
-from metarelay.testing.labarchives_smoke import MISSING_TREE_ID, main
+from metarelay.testing.labarchives_smoke import MISSING_TREE_ID, SmokeFailure, main
 
 AKID, AKPASS = "smoke-akid", "smoke-akpass-secret"
 EMAIL, CODE = "ada@example.org", "auth-code-secret"
@@ -447,6 +449,14 @@ def test_anonymize_replaces_the_whole_timestamp(real: str, fake: str) -> None:
             "a link (https://real.example.org)",
         ),
         ("<users><oops></users>", "the response is not XML, so it can't be checked"),
+        (
+            "<e><error-description>Notebook 'Grant drafts' not found</error-description></e>",
+            "<error-description> holds wording that is not on its list",
+        ),
+        (
+            "<e><last-modified-verb>edited by Jane Q</last-modified-verb></e>",
+            "<last-modified-verb> holds wording that is not on its list",
+        ),
     ],
 )
 def test_leaks_reports_what_no_list_covers(body: str, leak: str) -> None:
@@ -489,6 +499,63 @@ def test_a_cassette_that_could_hold_real_data_is_not_written(tmp_path: Path, cap
     err = capsys.readouterr().err
     assert "the element <institution> is not on a list" in err
     assert "NIMH" not in err  # the report names the element, not what it holds
+
+
+LEAKING = "<users><institution>NIMH Section on X</institution></users>"
+
+
+def test_a_leak_does_not_hide_the_failure_it_happened_in(tmp_path: Path) -> None:
+    path = tmp_path / "live.json"
+    with (
+        pytest.raises(SmokeFailure, match="preview was not updated") as caught,
+        record_http(path) as interactions,
+    ):
+        interactions.append(one_call(LEAKING))
+        raise SmokeFailure("preview was not updated in place")
+
+    [note] = caught.value.__notes__
+    assert "the element <institution> is not on a list" in note
+    assert not path.exists()
+
+
+def test_a_leak_is_the_error_when_nothing_else_failed(tmp_path: Path) -> None:
+    path = tmp_path / "live.json"
+    with (
+        pytest.raises(CassetteLeakError, match="<institution> is not on a list"),
+        record_http(path) as interactions,
+    ):
+        interactions.append(one_call(LEAKING))
+    assert not path.exists()
+
+
+def test_a_failed_run_without_a_leak_still_writes_its_cassette(tmp_path: Path) -> None:
+    path = tmp_path / "live.json"
+    with pytest.raises(SmokeFailure) as caught, record_http(path) as interactions:
+        interactions.append(one_call("<users><is-default>true</is-default></users>"))
+        raise SmokeFailure("preview was not updated in place")
+    assert not hasattr(caught.value, "__notes__")
+    assert len(load_cassette(path)) == 1
+
+
+def test_smoke_reports_the_failure_and_then_the_leak(
+    base_url: str, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import metarelay.testing.labarchives_smoke as smoke
+
+    def fail(*args, **kwargs):
+        raise SmokeFailure("preview was not updated in place")
+
+    def leak(path, interactions, secrets):
+        raise CassetteLeakError(f"Not writing {path}: the element <institution> is not on a list")
+
+    monkeypatch.setattr(smoke, "run_smoke", fail)
+    monkeypatch.setattr("metarelay.testing.labarchives_cassettes._write", leak)
+
+    assert run_smoke(base_url, "--record", str(tmp_path / "live.json")) == 1
+
+    err = capsys.readouterr().err.splitlines()
+    assert err[0] == "Smoke test failed: preview was not updated in place"
+    assert "the element <institution> is not on a list" in err[1]
 
 
 def test_the_fake_sends_nothing_the_lists_do_not_cover(tmp_path: Path) -> None:

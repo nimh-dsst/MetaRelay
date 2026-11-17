@@ -133,7 +133,6 @@ _FIXED = frozenset(
         "can-write-comments",
         "class",
         "error-code",
-        "error-description",
         "flags",
         "is-a-researcher",
         "is-a-student",
@@ -142,7 +141,6 @@ _FIXED = frozenset(
         "is-folder",
         "is-page",
         "is-page-locked",
-        "last-modified-verb",
         "max-file-size",
         "method",
         "number-comments",
@@ -154,6 +152,12 @@ _FIXED = frozenset(
     }
 )
 """LabArchives' own values: flags, counts, sizes, and fixed words."""
+# Sentences LabArchives writes. Only the wording seen so far is trusted: a new
+# one could repeat something from the request, such as a notebook's name.
+_KNOWN_TEXT = {
+    "error-description": frozenset({"your request contained bad information"}),
+    "last-modified-verb": frozenset({"file uploaded or modified by Partner application"}),
+}
 _WRITTEN = frozenset(
     {"attach-file-name", "caption", "change-description", "entry-data", "filename"}
 )
@@ -345,6 +349,10 @@ def leaks(interactions: Sequence[Mapping[str, Any]]) -> list[str]:
             fake = _is_fake_id(text)
         elif tag in _NAMES:
             fake = text in own_names or _is_fake_name(tag, text)
+        elif tag in _KNOWN_TEXT:
+            if text not in _KNOWN_TEXT[tag]:
+                leak(interaction, f"<{tag}> holds wording that is not on its list")
+            return
         else:
             leak(interaction, f"the element <{tag}> is not on a list")
             return
@@ -402,7 +410,14 @@ def _interaction(response: requests.Response) -> dict[str, Any]:
 
 @contextlib.contextmanager
 def record_http(path: str | Path) -> Iterator[list[dict[str, Any]]]:
-    """Record every ``requests`` call made inside the block to a cassette at ``path``."""
+    """Record every ``requests`` call made inside the block to a cassette at ``path``.
+
+    Raises:
+        CassetteLeakError: If the cassette could hold real data, so it was
+            not written. When the block itself raised, that error is the one
+            raised, with the leak attached as a note: the block's failure is
+            the first thing to fix, and often the cause of the leak.
+    """
     interactions: list[dict[str, Any]] = []
     secrets: set[str] = set()
     original = requests.Session.send
@@ -422,12 +437,19 @@ def record_http(path: str | Path) -> Iterator[list[dict[str, Any]]]:
         return response
 
     requests.Session.send = send  # type: ignore[method-assign]
+    # The cassette is written at the end: a secret learned late may appear in
+    # an earlier body, and a folder may be listed before the call that names it.
     try:
         yield interactions
-    finally:
+    except BaseException as failure:
         requests.Session.send = original  # type: ignore[method-assign]
-        # At the end: a secret learned late may appear in an earlier body,
-        # and a folder may be listed before the call that names it.
+        try:
+            _write(path, interactions, secrets)
+        except CassetteLeakError as leak:
+            failure.add_note(str(leak))
+        raise
+    else:
+        requests.Session.send = original  # type: ignore[method-assign]
         _write(path, interactions, secrets)
 
 

@@ -31,7 +31,9 @@ characters or longer, as LabArchives' IDs are.
 Recording fails closed. Every element, attribute, and request parameter must
 be on a list in `metarelay/testing/labarchives_cassettes.py` that says what it
 holds. If LabArchives sends one that is not, no cassette is written and the
-error names it. `test_committed_cassettes_hold_only_fake_data` runs the same
+error names it. The same goes for a sentence LabArchives writes (an error
+description, say) in wording not seen before: it could repeat a name from the
+request. When the smoke run itself failed, that failure is reported first. `test_committed_cassettes_hold_only_fake_data` runs the same
 check on every cassette here. Review a cassette before committing it anyway.
 
 To replace the values in a cassette recorded before these rules:
