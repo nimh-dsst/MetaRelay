@@ -100,6 +100,7 @@ from metarelay.core.preview import (
     diff_blocks,
     parse_html,
     render_preview,
+    to_html,
 )
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
@@ -337,7 +338,8 @@ def _entry_diff(
     field values back gives exactly the fields MetaRelay wrote (no field
     added, renamed, or retyped, and the path fields intact), the body still
     has the same headings and tables with nothing added between them, and the
-    body and the fields don't disagree about a value.
+    body and the field weren't both changed, to different values. (A value
+    changed in only one of the two places is an edit.)
     """
     _, written, _, origins = _render(path, ours["kind"], records)
     fields = _fields_diff(entry, written, origins)
@@ -383,9 +385,21 @@ def _fields_diff(
     # change. Not ``position``: it's display order, and re-rendering from the
     # stored records (whose keys MySQL reorders) can number fields differently.
     clean = _unordered(reverted) == _unordered(written)
-    diffs = [diff_blocks(rid, old, new, clean=clean) for rid, (old, new) in tables.items()]
+    diffs = [
+        diff_blocks(rid, _as_shown(old), _as_shown(new), clean=clean)
+        for rid, (old, new) in tables.items()
+    ]
     edits = [edit for diff in diffs for edit in diff.edits]
     return PreviewDiff(edits=edits, complete=clean and all(diff.complete for diff in diffs))
+
+
+def _as_shown(tables: list[Table]) -> list[Heading | Table]:
+    """Field values read the way the body's are, so the two compare equal.
+
+    The body is read through ``parse_html``, which collapses whitespace; the
+    same round trip here keeps one rule for both (as ``preview_diff`` does).
+    """
+    return parse_html(to_html(tables))[0]
 
 
 def _unordered(fields: Mapping[str, Any]) -> dict[str, Any]:
@@ -402,19 +416,18 @@ def _body_diff(body: Any, records: Mapping[str, Record]) -> PreviewDiff:
     if not isinstance(body, str):
         return PreviewDiff(edits=[], complete=False)
     found, clean = parse_html(body)
-    # The body is each record's preview in turn, each starting with its heading.
-    sections: list[list[Heading | Table]] = []
-    for block in found:
-        if isinstance(block, Heading) or not sections:
-            sections.append([])
-        sections[-1].append(block)
-    keys = sorted(records)
-    if len(sections) != len(keys):
+    # The body is each record's preview in turn. Split it by how many blocks
+    # each preview has, not by headings: a schema's own renderer may use any
+    # number. Blocks added or removed leave the counts off: not complete.
+    diffs: list[PreviewDiff] = []
+    start = 0
+    for key in sorted(records):
+        expected = parse_html(render_preview(records[key]).html)[0]
+        section = found[start : start + len(expected)]
+        start += len(expected)
+        diffs.append(diff_blocks(key, expected, section, clean=clean))
+    if start != len(found):
         return PreviewDiff(edits=[], complete=False)
-    diffs = [
-        diff_blocks(key, parse_html(render_preview(records[key]).html)[0], section, clean=clean)
-        for key, section in zip(keys, sections, strict=True)
-    ]
     return PreviewDiff(
         edits=[edit for diff in diffs for edit in diff.edits],
         complete=clean and all(diff.complete for diff in diffs),
