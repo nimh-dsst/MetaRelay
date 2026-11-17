@@ -4,7 +4,7 @@ A destination is a URI::
 
     file:///Users/me/metadata
     labarchives://api.labarchives.com
-    elabftw://elab.example.org/api/v2
+    elabftw://elab.example.org/experiments
     github://my-lab/metadata@main/records
 
 The scheme picks the backend; each backend interprets ``netloc`` and ``path``.

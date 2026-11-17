@@ -29,7 +29,7 @@ dependencies = [
 # 1.2.0 is the first labapi that reads the error code LabArchives nests inside
 # the API class root. Without it a bad login is not an authentication error.
 labarchives = ["labapi>=1.2.0,<2"]
-elabftw = ["elabapi-python>=5,<7"]
+elabftw = ["elabapi-python>=6,<7"]
 github = ["httpx>=0.28,<1"]
 nwb = [
     "pynwb>=4.1,<5",
@@ -46,6 +46,7 @@ metarelay = "metarelay.cli:main"
 [project.entry-points."metarelay.backends"]
 file = "metarelay.backends.local:LocalBackend"
 labarchives = "metarelay.backends.labarchives:LabArchivesBackend"
+elabftw = "metarelay.backends.elabftw:ElabFTWBackend"
 
 [project.urls]
 Repository = "https://github.com/nimh-dsst/MetaRelay"
