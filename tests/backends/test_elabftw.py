@@ -27,6 +27,7 @@ pytest.importorskip("elabapi_python")
 
 from metarelay import connect
 from metarelay.backends import elabftw as backend
+from metarelay.core import preview
 from metarelay.core.auth import AuthFlow
 from metarelay.core.backend import auth_flow
 from metarelay.core.conflict import WriteMode, accept_edits
@@ -325,8 +326,49 @@ def test_entry_diff_ignores_field_positions() -> None:
     assert _diff(change) == PreviewDiff(edits=[], complete=True)
 
 
-def test_body_diff_without_records_is_incomplete_when_text_was_added() -> None:
-    assert backend._body_diff("<p>note</p>", {}) == PreviewDiff(edits=[], complete=False)
+def test_body_diff_without_records_is_incomplete_when_a_table_was_added() -> None:
+    # A table parses cleanly, so only the block count catches it.
+    table = "<table><tr><td>a</td><td>b</td></tr></table>"
+    assert backend._body_diff("", {}) == PreviewDiff(edits=[], complete=True)
+    assert backend._body_diff(table, {}) == PreviewDiff(edits=[], complete=False)
+
+
+def test_entry_diff_matches_a_multiline_value_in_body_and_field() -> None:
+    # The body is read by its text, which collapses whitespace; the field
+    # keeps the raw value. Both must read the same to be matched.
+    records = {"rec-1": make("rec-1", label="two\nlines")}
+    entry, ours, path = _saved_entry(records)
+    entry["body"] = entry["body"].replace("two\nlines", "edited")
+    entry["metadata"]["extra_fields"]["rec-1 · label"].update(value="other")
+    diff = backend._entry_diff(entry, ours, path, records)
+    assert diff.edits == [
+        _edit("rec-1", "label", "two lines", "other"),
+        _edit("rec-1", "label", "two lines", "edited"),
+    ]
+    assert not diff.complete
+
+
+def test_entry_diff_ignores_whitespace_only_field_changes() -> None:
+    diff = _diff(lambda entry, fields: fields["rec-2 · label"].update(value=" first "))
+    assert diff == PreviewDiff(edits=[], complete=True)
+
+
+def test_body_diff_splits_a_preview_with_its_own_layout(monkeypatch) -> None:
+    # A schema's own renderer may use several headings, or none.
+    def two_headings(record):
+        return [
+            preview.Heading(text="Part one"),
+            preview.Heading(text=record.record_id),
+            preview.Table(title="Metadata", rows=[("label", record.payload["label"])]),
+        ]
+
+    records = {"rec-1": make("rec-1"), "rec-2": make("rec-2")}
+    monkeypatch.setitem(preview._renderers, TEST_SCHEMA_ID, two_headings)
+    entry, _, _ = _saved_entry(records)
+    assert backend._body_diff(entry["body"], records) == PreviewDiff(edits=[], complete=True)
+    _in_body(entry, "<td>first</td>", "<td>by hand</td>")
+    diff = backend._body_diff(entry["body"], records)
+    assert diff == PreviewDiff(edits=[_edit("rec-1", "label", "first", "by hand")], complete=True)
 
 
 def test_entry_diff_is_incomplete_when_a_record_section_is_missing() -> None:
