@@ -783,3 +783,11 @@ def test_an_identical_write_racing_ours_is_not_a_conflict(
         _before_each_commit(session, _once(lambda _: other.write_record(STUDY, record)))
         session.write_record(STUDY, record)
     assert session.read_record(STUDY, "fiber-1").record == record
+
+
+def test_a_branch_deleted_during_a_write_is_not_found(
+    session: GitHubSession, fake: FakeGitHub, make_record
+) -> None:
+    _before_each_commit(session, _once(lambda _: fake.repo(REPO).branches.pop("main")))
+    with pytest.raises(NotFoundError, match="no branch 'main' any more"):
+        session.write_record(STUDY, make_record())

@@ -275,6 +275,9 @@ def _raise_for(response: httpx.Response, action: str) -> None:
         raise NotFoundError(f"The repository is empty, so MetaRelay could not {action}.")
     if status == 409:
         raise BackendUnavailableError(f"GitHub refused to {action}{detail}")
+    if status == 422 and "reference does not exist" in lower:
+        # The branch was deleted after MetaRelay read it.
+        raise NotFoundError(f"The branch is gone, so MetaRelay could not {action}.")
     if status == 422:
         raise ValidationError(f"GitHub refused to {action}{detail}")
     if status >= 500:
@@ -893,12 +896,15 @@ class GitHubSession:
         )
         with _network_errors(action):
             commit_sha = str(commit["sha"])
-        self._request(
-            "PATCH",
-            f"{self._repo_url}/git/refs/{self._ref_path}",
-            action,
-            body={"sha": commit_sha, "force": False},
-        )
+        try:
+            self._request(
+                "PATCH",
+                f"{self._repo_url}/git/refs/{self._ref_path}",
+                action,
+                body={"sha": commit_sha, "force": False},
+            )
+        except NotFoundError:
+            raise NotFoundError(self._branch_gone()) from None
         _remember(self._commit_trees, commit_sha, tree_sha)
         _remember(self._replaced, snapshot.commit, None)
         if self._latest is not None:
