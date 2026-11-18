@@ -13,6 +13,7 @@ from metarelay import (
     NotFoundError,
     ValidationError,
     WriteMode,
+    accept_edits,
     connect,
 )
 from metarelay.backends.local import LocalSession, check_local_name
@@ -548,3 +549,31 @@ def test_an_emptied_preview_lists_every_row_as_removed(session: LocalSession, ma
     diff = raised.value.preview_diff
     assert diff is not None
     assert diff.edits and all(edit.current is None for edit in diff.edits)
+
+
+@pytest.mark.parametrize("extra", ["", "\nA note added under the tables.\n"])
+def test_an_edit_to_a_stale_preview_cannot_be_accepted(
+    session: LocalSession, make_record, extra: str
+) -> None:
+    """When the .json was edited without its preview, the preview still
+    shows the old record. Its old values must not read as a person's edits:
+    accepting them would undo the change to the .json. Also when the preview
+    has a change MetaRelay can't list."""
+    session.write_record(STUDY, make_record(diameter_um=400))
+    record_file = folder(session) / "fiber-1.json"
+    data = json.loads(record_file.read_text())
+    data["payload"]["diameter_um"] = 300.0
+    record_file.write_text(json.dumps(data, indent=2) + "\n")
+    md = folder(session) / "fiber-1.md"
+    md.write_text(md.read_text().replace("| subject_id | M1 |", "| subject_id | M2 |") + extra)
+
+    read = session.read_record(STUDY, "fiber-1")
+    with pytest.raises(ConflictError, match="preview was edited") as raised:
+        session.write_record(STUDY, make_record(diameter_um=300), prior_receipt=read.receipt)
+    diff = raised.value.preview_diff
+    assert diff is not None and not diff.complete
+    assert diff.edits == []
+    assert "diameter_um" not in str(raised.value)
+    with pytest.raises(ConflictError, match="can't list"):
+        accept_edits(session, STUDY, make_record(diameter_um=300), diff)
+    assert session.read_record(STUDY, "fiber-1").record.payload == {"diameter_um": 300.0}

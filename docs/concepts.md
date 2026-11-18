@@ -132,7 +132,10 @@ forced write, it overwrites a change someone makes at the same moment.
 list, such as text added between the tables: look at the entry and copy what
 you want by hand. The written values come from rendering the stored record
 again, so if a MetaRelay upgrade or a schema's renderer changed how a value
-reads since the last write, that row shows up as an edit too.
+reads since the last write, that row shows up as an edit too. On a local
+folder or GitHub the diff lists no edits instead, as it does when someone
+edited the `.json` but not the preview: MetaRelay can't tell old values from
+a person's edits.
 
 The `metarelay` command does the same: `metarelay write` lists the edits,
 and `metarelay write --accept-edits` accepts them and updates your JSON file.

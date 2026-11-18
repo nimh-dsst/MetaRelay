@@ -64,7 +64,7 @@ from metarelay.core.errors import (
     ValidationError,
 )
 from metarelay.core.path import ROOT, Container, LogicalPath
-from metarelay.core.preview import preview_diff, render_preview
+from metarelay.core.preview import render_preview, stored_preview_diff
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
 from metarelay.core.session import StoredRecord
@@ -284,9 +284,10 @@ class LocalSession:
                     if remote_preview is not None
                     else None
                 ),
-                preview_diff=lambda: preview_diff(
+                preview_diff=lambda: stored_preview_diff(
                     remote_bytes,
                     remote_preview.decode(errors="replace") if remote_preview is not None else None,
+                    self._written_preview(folder, record_id),
                     format="markdown",
                 ),
             )

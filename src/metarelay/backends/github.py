@@ -87,7 +87,7 @@ from metarelay.core.errors import (
     ValidationError,
 )
 from metarelay.core.path import ROOT, Container, LogicalPath
-from metarelay.core.preview import PreviewDiff, preview_diff, render_preview
+from metarelay.core.preview import render_preview, stored_preview_diff
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
 from metarelay.core.session import StoredRecord
@@ -413,34 +413,6 @@ class _Index:
         return (json.dumps(content, indent=2, ensure_ascii=False) + "\n").encode()
 
 
-def _stored_preview_diff(
-    stored: bytes | None, preview: bytes | None, written_preview: str | None
-) -> PreviewDiff | None:
-    """What someone changed in the ``.md`` preview, compared with the stored record.
-
-    MetaRelay commits a record and its preview together, but the preview can
-    still lag the record: someone changed the ``.json`` at GitHub and left
-    the preview alone. Compared with the stored record, the preview's old
-    values would then read as a person's edits, and accepting them would
-    undo that change. So the diff is complete only when the preview
-    MetaRelay last wrote (the index's checksum) is the stored record's own
-    render. Otherwise it lists no edits: MetaRelay can't separate them.
-    """
-    text = preview.decode(errors="replace") if preview is not None else None
-    diff = preview_diff(stored, text, format="markdown")
-    if diff is None or not diff.complete:
-        return diff
-    try:
-        rendered = render_preview(Record.model_validate_json(stored or b"")).markdown
-    except ValueError:
-        rendered = None
-    if rendered is None or preview_checksum(rendered) != written_preview:
-        # The preview lags the record, so its differences mix a person's
-        # edits with values from before the .json changed. List none of them.
-        return PreviewDiff(edits=[], complete=False)
-    return diff
-
-
 class GitHubSession:
     """A session on a GitHub repository. Create it with ``connect("github://...")``."""
 
@@ -580,8 +552,11 @@ class GitHubSession:
                 else None,
                 prior_receipt=prior_receipt,
                 remote_preview_checksum=remote_preview_sum,
-                preview_diff=lambda: _stored_preview_diff(
-                    remote_bytes, remote_preview, written_preview
+                preview_diff=lambda: stored_preview_diff(
+                    remote_bytes,
+                    remote_preview.decode(errors="replace") if remote_preview is not None else None,
+                    written_preview,
+                    format="markdown",
                 ),
             )
 
