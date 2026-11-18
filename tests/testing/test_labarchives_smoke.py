@@ -94,7 +94,8 @@ def test_smoke_reports_stripped_comments_and_still_passes(monkeypatch, capsys) -
     assert "All smoke checks passed" in out
 
 
-def test_check_edits_catches_an_edit_made_by_hand(monkeypatch, capsys) -> None:
+def _smoke_with_hand_edit(monkeypatch, *edits: tuple[str, str], extra: tuple[str, ...] = ()) -> int:
+    """Run ``--check-edits``, making each "by hand" edit ``(old, new)`` in the entry."""
     fake = FakeLabArchives(akid=AKID, akpass=AKPASS)
     fake.add_user(EMAIL, auth_code=CODE, notebooks=["Lab Notebook"])
 
@@ -104,7 +105,11 @@ def test_check_edits_catches_an_edit_made_by_hand(monkeypatch, capsys) -> None:
             for entry in fake._entries.values()
             if entry.data.startswith("<!-- metarelay-record:smoke-1 -->")
         ]
-        fake.edit_entry(entry.eid, entry.data.replace("second", "changed by hand"))
+        data = entry.data
+        for old, new in edits:
+            assert old in data
+            data = data.replace(old, new)
+        fake.edit_entry(entry.eid, data)
         return ""
 
     monkeypatch.setattr("builtins.input", edit_the_preview)
@@ -112,8 +117,46 @@ def test_check_edits_catches_an_edit_made_by_hand(monkeypatch, capsys) -> None:
         monkeypatch.setenv("METARELAY_LABARCHIVES_AKID", AKID)
         monkeypatch.setenv("METARELAY_LABARCHIVES_AKPASS", AKPASS)
         monkeypatch.setenv("METARELAY_LABARCHIVES_API_URL", url)
-        assert run_smoke(url, "--check-edits") == 0
-    assert "edited in LabArchives is not overwritten" in capsys.readouterr().out
+        return run_smoke(url, "--check-edits", *extra)
+
+
+def test_check_edits_reads_and_accepts_an_edit_made_by_hand(monkeypatch, capsys) -> None:
+    assert _smoke_with_hand_edit(monkeypatch, ("<td>second</td>", "<td>edited</td>")) == 0
+    out = capsys.readouterr().out
+    assert "edited in LabArchives is not overwritten" in out
+    assert "the conflict names the edit: Metadata · label: 'second' → 'edited'" in out
+    assert "accepting the edit copies it into the record" in out
+    assert "All smoke checks passed" in out
+
+
+def test_check_edits_can_be_recorded(monkeypatch, tmp_path: Path, capsys) -> None:
+    # DSST runs --check-edits with --record. The recorder fails closed on
+    # anything it doesn't know, so the accept step's traffic must pass it.
+    path = tmp_path / "edits.json"
+    edit = ("<td>second</td>", "<td>edited</td>")
+    assert _smoke_with_hand_edit(monkeypatch, edit, extra=("--record", str(path))) == 0
+    assert "All smoke checks passed" in capsys.readouterr().out
+    assert path.exists()
+
+
+def test_check_edits_fails_when_the_edit_is_read_wrong(monkeypatch, capsys) -> None:
+    # The person changed the value instead, so what MetaRelay reads isn't
+    # the expected edit. The run must fail and say what it read.
+    assert _smoke_with_hand_edit(monkeypatch, ("<td>2.0</td>", "<td>9.0</td>")) == 1
+    captured = capsys.readouterr()
+    assert "not overwritten" in captured.out
+    assert "read the edit wrong" in captured.err
+    assert "value: '2.0' → '9.0'" in captured.err
+    assert "All smoke checks passed" not in captured.out
+
+
+def test_check_edits_fails_when_something_else_changed_too(monkeypatch, capsys) -> None:
+    # The right edit plus text MetaRelay can't list: the diff is incomplete,
+    # so accepting would be refused. The smoke run reports it instead.
+    right_edit = ("<td>second</td>", "<td>edited</td>")
+    note = ("<td>2.0</td></tr></tbody></table>", "<td>2.0</td></tr></tbody></table><p>a note</p>")
+    assert _smoke_with_hand_edit(monkeypatch, right_edit, note) == 1
+    assert "complete: False" in capsys.readouterr().err
 
 
 def test_smoke_needs_an_existing_notebook(base_url: str, capsys) -> None:

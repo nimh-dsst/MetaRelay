@@ -21,8 +21,9 @@ attachment's caption, so either answer works; the marker is only the
 fallback after a write that failed halfway. And it asks for a folder that
 doesn't exist, so the cassette records the error LabArchives answers with
 (4999, "your request contained bad information"). ``--check-edits`` adds a
-step where you edit the preview in LabArchives by hand, to check that the
-next write refuses to overwrite it.
+step where you edit the preview in LabArchives by hand. It checks that the
+next write refuses to overwrite it, that the conflict names exactly your
+edit, and that accepting the edit copies it into the record.
 
 ``--record`` saves the traffic as a cassette with no real data in it: secrets
 are redacted, and IDs, personal details, and names the script did not create
@@ -57,8 +58,10 @@ from metarelay.backends.labarchives import (
 )
 from metarelay.core import registry as registry_module
 from metarelay.core.backend import begin_login, complete_login
+from metarelay.core.conflict import accept_edits
 from metarelay.core.errors import ConflictError, MetaRelayError, ValidationError
 from metarelay.core.path import ROOT, LogicalPath
+from metarelay.core.receipt import Receipt
 from metarelay.core.record import Record
 from metarelay.core.session import Session
 from metarelay.testing.labarchives_cassettes import CassetteLeakError, record_http
@@ -176,16 +179,7 @@ def run_smoke(
     say("ok   the readable preview is tracked and updated in place")
 
     if pause is not None:
-        pause(
-            f"\nIn LabArchives, open the {RECORDS_PAGE!r} page in {str(folder)!r}, change "
-            "any text in the table entry for smoke-1, save it, then press Enter here. "
-        )
-        try:
-            session.write_record(folder, _record("third", 4.0), prior_receipt=updated)
-        except ConflictError:
-            say("ok   a preview edited in LabArchives is not overwritten")
-        else:
-            raise SmokeFailure("the edit made in LabArchives was overwritten")
+        _check_edits(session, folder, updated, say, pause)
 
     data = b"time,signal\n0,1.5\n"
     file_receipt = session.write_file(folder, "trace.csv", data, media_type="text/csv")
@@ -214,6 +208,61 @@ def run_smoke(
     say(f"ok   a page ({str(page)!r}) holds records and can't contain folders")
 
     say(f"All smoke checks passed. Remove {str(folder)!r} in LabArchives when done.")
+
+
+EDITED_LABEL = "edited"
+"""What the person running ``--check-edits`` types over the label ``second``."""
+
+
+def _check_edits(
+    session: Session,
+    folder: LogicalPath,
+    updated: Receipt,
+    say: Callable[[str], None],
+    pause: Callable[[str], object],
+) -> None:
+    """Ask for one hand edit in LabArchives, then check MetaRelay sees and accepts it.
+
+    The edit must not be overwritten, the conflict must name exactly that
+    change, and ``accept_edits`` must copy it into the record. LabArchives
+    rewrites stored HTML, so this is the check that reading edits back works
+    on real LabArchives, not only on the fake.
+    """
+    pause(
+        f"\nIn LabArchives, open the {RECORDS_PAGE!r} page in {str(folder)!r}. In the "
+        f"table entry for smoke-1, change the label 'second' to {EDITED_LABEL!r}. Change "
+        "nothing else. Save it, then press Enter here. "
+    )
+    record = _record("second", 2.0)  # the record as written: the edit applies to it
+    try:
+        session.write_record(folder, record, prior_receipt=updated)
+    except ConflictError as error:
+        diff = error.preview_diff
+    else:
+        raise SmokeFailure("the edit made in LabArchives was overwritten")
+    say("ok   a preview edited in LabArchives is not overwritten")
+
+    _check(diff is not None, "the conflict did not say what was edited")
+    assert diff is not None  # for the type checker
+    found = [(e.table, e.field, e.written, e.current) for e in diff.edits]
+    expected = [("Metadata", "label", "second", EDITED_LABEL)]
+    _check(
+        found == expected and diff.complete,
+        f"MetaRelay read the edit wrong. Expected: Metadata · label: 'second' → "
+        f"{EDITED_LABEL!r}, and nothing else. It read: {diff.describe()} "
+        f"(complete: {diff.complete}). If you made exactly that edit, LabArchives "
+        "changed the entry's HTML in a way MetaRelay doesn't read yet.",
+    )
+    say(f"ok   the conflict names the edit: {diff.edits[0].describe()}")
+
+    written = accept_edits(session, folder, record, diff)
+    stored = session.read_record(folder, record.record_id)
+    _check(
+        stored.record.payload["label"] == EDITED_LABEL
+        and written[record.record_id].record.payload == stored.record.payload,
+        "accepting the edit did not copy it into the record",
+    )
+    say("ok   accepting the edit copies it into the record")
 
 
 def _marker_kept(session: Session, folder: LogicalPath, record_id: str) -> bool | None:
@@ -301,7 +350,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--check-edits",
         action="store_true",
-        help="pause so you can edit a preview in LabArchives, then check it isn't overwritten",
+        help="pause so you can edit a preview in LabArchives, then check it is read and accepted",
     )
     args = parser.parse_args(argv)
     pause = input if args.check_edits else None
