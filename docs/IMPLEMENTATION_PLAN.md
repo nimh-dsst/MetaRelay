@@ -143,7 +143,7 @@ them. The proposed behavior is in D7.
 | **Local** | Directory tree | `{id}.json` + index/history | `{id}.md` sidecar | Content hash | Conformance oracle, always in CI |
 | **LabArchives** | Notebook → directory → page | JSON attachment entry with marker | Rich-text entry with rendered tables | Attachment checksum | Stateful fake LabArchives API server (real `labapi` runs against it) + recorded cassettes; DSST tests with real credentials before acceptance |
 | **eLabFTW** | Category/tags → experiment or resource item | Upload, body block, or `extra_fields` (decide in spike) | Body with rendered tables | Upload checksum | Docker instance (`elabftw/elabimg:6.0.9`) in CI |
-| **GitHub** | Directory under prefix | `{id}.json` via Contents API | `{id}.md` | Blob `sha` | HTTP mocks in CI; optional live test |
+| **GitHub** | Directory under prefix | `{id}.json` via Git Data API, one commit per write | `{id}.md` | Blob `sha` | HTTP mocks in CI; optional live test |
 
 GitHub is metadata-only: derivative uploads are size-capped with a clear
 error.
@@ -333,7 +333,7 @@ PRs. Labels: `goal:1a|1b|1c|2|3`, `backend:<name>`, `schema`, `infra`,
 3. **Local backend, conformance suite and CLI** — reference `file://` backend; shared conformance tests and in-memory fake every backend must pass; `metarelay` CLI; quickstart and concepts docs.
 4. **LabArchives backend** `backend:labarchives` — fake LabArchives API server first (endpoints `labapi` calls, seeded fixtures, stubbed redirect auth) plus the `docker compose` dev stack; confirm `labapi`'s base URL can be overridden (upstream PR if not); redirect auth flow, container browse/ensure, record upsert with preview and conflict logic, derivative files; cassette harness and DSST-run live smoke script; DSST acceptance test with real credentials; upstream `labapi` contributions as needed.
 5. **eLabFTW backend** `backend:elabftw` — storage-mapping spike and ADR (D3 criteria, including direct edits per D7); `elabimg` 6.0.9 docker instance in CI and in the dev stack; full backend to conformance green.
-6. **GitHub backend** `backend:github` — Contents-API backend with `sha` conflict token and size-capped files; mock suite and optional live test.
+6. **GitHub backend** `backend:github` — Git Data API backend (one commit per write) with `sha` conflict token and size-capped files; mock suite and optional live test.
 
 ### Goal 1b — Metadata format
 1. **Schema framework** `schema` — base model config, versioning and migration runner, example instances, JSON Schema export with golden-file check, generated schema-reference docs.
