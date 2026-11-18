@@ -81,6 +81,9 @@ services:
       MYSQL_USER: elabftw
       MYSQL_PASSWORD: elabftw-dev
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pelabftw-dev-root"]
+      # Over TCP, not the socket: during first start MySQL runs a socket-only
+      # setup server, and eLabFTW (which connects over TCP and doesn't retry)
+      # would start too early and fail with "Connection refused".
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pelabftw-dev-root"]
       interval: 5s
       retries: 60
