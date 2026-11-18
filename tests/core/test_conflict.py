@@ -12,7 +12,7 @@ from metarelay import (
     WriteMode,
 )
 from metarelay.core.conflict import decide_write
-from metarelay.core.preview import PreviewDiff
+from metarelay.core.preview import PreviewDiff, PreviewEdit
 
 LOCAL = "local"
 PRIOR = "prior"
@@ -33,13 +33,16 @@ def receipt(checksum: str = PRIOR, preview_checksum: str | None = None) -> Recei
     )
 
 
-def decide(mode=WriteMode.UPSERT, remote=None, prior=None, remote_preview=None) -> WriteAction:
+def decide(
+    mode=WriteMode.UPSERT, remote=None, prior=None, remote_preview=None, **kwargs
+) -> WriteAction:
     return decide_write(
         mode=mode,
         local_checksum=LOCAL,
         remote_checksum=remote,
         prior_receipt=prior,
         remote_preview_checksum=remote_preview,
+        **kwargs,
     )
 
 
@@ -242,3 +245,80 @@ def test_accept_edits_writes_nothing_when_it_cant_accept_everything(make_record)
     with pytest.raises(ConflictError, match="can't list"):
         accept_edits(session, where, make_record(), PreviewDiff(edits=[edit], complete=False))
     assert session.read_record(where, "fiber-1").record.payload == {"diameter_um": 400.0}
+
+
+class TestEntryEdits:
+    """Several records share one preview (an eLabFTW entry): a hand edit to it
+    blocks every write into the entry until forced."""
+
+    @staticmethod
+    def decide(mode=WriteMode.UPSERT, remote=None, prior=None, **kwargs) -> WriteAction:
+        return decide(mode, remote, prior, entry_edited=True, **kwargs)
+
+    @pytest.mark.parametrize("mode", [WriteMode.UPSERT, WriteMode.CREATE])
+    def test_it_blocks_a_new_record(self, mode) -> None:
+        with pytest.raises(ConflictError, match="entry holding this record was edited"):
+            self.decide(mode=mode)
+
+    def test_it_blocks_a_changed_record(self) -> None:
+        with pytest.raises(ConflictError, match="edited directly"):
+            self.decide(remote=PRIOR, prior=receipt())
+
+    def test_it_blocks_an_unchanged_record_with_a_receipt(self) -> None:
+        # The caller thinks the entry is as MetaRelay left it; it isn't.
+        with pytest.raises(ConflictError, match="edited directly"):
+            self.decide(remote=LOCAL, prior=receipt(LOCAL))
+
+    def test_identical_content_with_no_receipt_is_not_a_conflict(self) -> None:
+        assert self.decide(remote=LOCAL) is WriteAction.SKIP
+
+    def test_a_record_deleted_since_the_receipt_is_still_blocked(self) -> None:
+        with pytest.raises(ConflictError, match="edited directly"):
+            self.decide(prior=receipt())
+
+    @pytest.mark.parametrize("remote", [None, PRIOR])
+    def test_force_writes(self, remote) -> None:
+        assert self.decide(mode=WriteMode.FORCE, remote=remote) is WriteAction.WRITE
+
+    def test_record_conflicts_come_first(self) -> None:
+        with pytest.raises(ConflictError, match="already exists"):
+            self.decide(mode=WriteMode.CREATE, remote=PRIOR)
+        with pytest.raises(ConflictError, match="changed at the destination"):
+            self.decide(remote="someone else's", prior=receipt())
+
+    def test_the_diff_names_other_records(self) -> None:
+        other = PreviewEdit(
+            record_id="rec-2", table="Metadata", field="site", written="NAc", current="VTA"
+        )
+        diff = PreviewDiff(edits=[other], complete=True)
+        with pytest.raises(ConflictError, match="site of rec-2: 'NAc' → 'VTA'") as raised:
+            self.decide(preview_diff=lambda: diff, record_id="rec-1")
+        assert raised.value.preview_diff == diff
+
+    def test_a_failing_diff_still_raises_the_conflict(self) -> None:
+        def broken() -> PreviewDiff:
+            raise KeyError("odd entry")
+
+        with pytest.raises(ConflictError, match="edited directly") as raised:
+            self.decide(preview_diff=broken)
+        assert raised.value.preview_diff is None
+
+    def test_an_unedited_entry_changes_nothing(self) -> None:
+        assert decide(entry_edited=False) is WriteAction.WRITE
+
+    @pytest.mark.parametrize(
+        ("edited", "mode", "remote", "has_receipt"),
+        [
+            (False, WriteMode.UPSERT, None, False),
+            (False, WriteMode.UPSERT, PRIOR, True),
+            (True, WriteMode.UPSERT, LOCAL, False),
+            (True, WriteMode.FORCE, PRIOR, True),
+        ],
+        ids=["not edited, new", "not edited, update", "identical, no receipt", "force"],
+    )
+    def test_the_diff_is_built_only_for_a_conflict(self, edited, mode, remote, has_receipt):
+        # Building it reads and renders the whole entry: not on every write.
+        calls: list[None] = []
+        prior = receipt() if has_receipt else None
+        decide(mode, remote, prior, entry_edited=edited, preview_diff=lambda: calls.append(None))
+        assert calls == []
