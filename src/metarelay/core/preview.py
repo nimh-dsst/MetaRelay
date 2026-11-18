@@ -43,6 +43,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
+from metarelay.core.checksum import preview_checksum
 from metarelay.core.errors import ValidationError
 from metarelay.core.model import MetaRelayModel
 from metarelay.core.record import Record
@@ -315,6 +316,36 @@ def preview_diff(
         expected, _ = parse_html(to_html(blocks))
         found, clean = parse_html(current)
     return diff_blocks(written.record_id, expected, found, clean=clean)
+
+
+def stored_preview_diff(
+    stored: bytes | None,
+    current: str | None,
+    written_checksum: str | None,
+    *,
+    format: Literal["markdown", "html"],
+) -> PreviewDiff | None:
+    """``preview_diff`` for a backend where the record file can be edited too.
+
+    MetaRelay writes a record and its preview together, but someone can edit
+    the stored record (the ``.json``) and leave the preview alone. Compared
+    with the stored record, the preview's old values would then read as a
+    person's edits, and accepting them would undo that change.
+
+    ``written_checksum`` is the ``preview_checksum`` of the preview MetaRelay
+    last wrote. The diff is complete only when that preview is the stored
+    record's own render. Otherwise the preview lags the record and its
+    differences mix a person's edits with old values, so none are listed.
+    """
+    diff = preview_diff(stored, current, format=format)
+    if diff is None or not diff.complete:
+        return diff
+    record = Record.model_validate_json(stored or b"")  # preview_diff parsed it
+    preview = render_preview(record)
+    rendered = preview.markdown if format == "markdown" else preview.html
+    if written_checksum is None or preview_checksum(rendered) != written_checksum:
+        return PreviewDiff(edits=[], complete=False)
+    return diff
 
 
 def diff_blocks(

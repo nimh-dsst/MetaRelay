@@ -134,6 +134,13 @@ you want by hand. The written values come from rendering the stored record
 again, so if a MetaRelay upgrade or a schema's renderer changed how a value
 reads since the last write, that row shows up as an edit too.
 
+On a local folder or GitHub, someone can also edit the record's `.json` and
+leave the preview alone. The preview then still shows the old values, and
+MetaRelay can't tell them from a person's edits, so the diff lists none and
+is not complete: overwrite the preview with `mode="force"`, or copy the edits
+you want by hand. This is also the case for a local record written before
+MetaRelay kept the checksum of the preview it wrote.
+
 The `metarelay` command does the same: `metarelay write` lists the edits,
 and `metarelay write --accept-edits` accepts them and updates your JSON file.
 
