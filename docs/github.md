@@ -118,8 +118,12 @@ write raises `ConflictError` instead. `mode="create"` raises `ConflictError`
 if the record exists, even if it was created during the write.
 
 Editing the `.md` preview on github.com is also a `ConflictError` on the next
-write (D7), even if your code read the record after the edit. Keep the edit
-by copying it into the record, or replace it with `mode="force"`.
+write (D7), even if your code read the record after the edit. The error's
+`preview_diff` lists the values that changed. Keep the edits with
+`accept_edits`, which copies them into the record and writes it, or
+`metarelay write --accept-edits`
+([Concepts](concepts.md#when-someone-edited-the-preview)); or replace them
+with `mode="force"`.
 
 ## Files are size-capped
 
@@ -137,6 +141,7 @@ and put its location in the record.
 | 403 (other), 422 for a protected branch | `PermissionDeniedError` |
 | The record or preview changed during the write | `ConflictError` |
 | Missing repository or branch at `connect()` | `ConfigurationError` |
+| Branch deleted after `connect()`, even during a write | `NotFoundError` |
 
 ## Testing
 

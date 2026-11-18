@@ -91,7 +91,8 @@ def _parser() -> argparse.ArgumentParser:
     write.add_argument(
         "--accept-edits",
         action="store_true",
-        help="if someone edited the record's table in the notebook, copy their edits "
+        help="if someone edited the record's preview (its notebook entry or .md file), "
+        "copy their edits "
         "into the record, write it, and update FILE with them (upsert only)",
     )
 
@@ -217,7 +218,7 @@ def _accept(
     record: Record,
     error: ConflictError,
 ) -> list[Receipt]:
-    """Keep the notebook edits ``error`` lists, and put them in the input file too.
+    """Keep the preview edits ``error`` lists, and put them in the input file too.
 
     Returns the receipts of every record written, ``record``'s first.
     """
@@ -226,7 +227,7 @@ def _accept(
         raise error  # not an edit to the preview: nothing to accept
     written = accept_edits(session, path, record, diff)
     for edit in diff.edits:
-        print(f"Accepted from the notebook: {edit.record_id}: {edit.describe()}", file=sys.stderr)
+        print(f"Accepted from the preview: {edit.record_id}: {edit.describe()}", file=sys.stderr)
     edited = written[record.record_id].record.model_dump_json(indent=2) + "\n"
     # The file must hold the edits too: written again unchanged, it would
     # undo them without a conflict, since the receipt matches.

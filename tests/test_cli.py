@@ -287,7 +287,7 @@ def test_a_write_lists_notebook_edits_and_can_accept_them(
     assert "re-run with --accept-edits" in capsys.readouterr().err
     assert write(same, "--accept-edits") == 0
     err = capsys.readouterr().err
-    assert "Accepted from the notebook: fiber-1: Metadata · diameter_um: '400.0' → '250'" in err
+    assert "Accepted from the preview: fiber-1: Metadata · diameter_um: '400.0' → '250'" in err
     assert main(["read", dest, "Study", "fiber-1"]) == 0
     assert json.loads(capsys.readouterr().out)["payload"] == {"diameter_um": 250.0}
     # The file has the edit too, so writing it again keeps it.
