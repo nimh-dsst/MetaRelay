@@ -9,7 +9,7 @@ Planned backends:
 - Local disk (always available)
 - LabArchives, via [`labapi`](https://pypi.org/project/labapi/)
 - eLabFTW, via [`elabapi-python`](https://pypi.org/project/elabapi-python/)
-- GitHub, via the Contents API
+- GitHub, via the Git Data API (one commit per write)
 
 Metadata schemas cover
 [`ndx-fiber-photometry`](https://github.com/catalystneuro/ndx-fiber-photometry)

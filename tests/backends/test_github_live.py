@@ -45,11 +45,22 @@ class TestGitHubLive(BackendConformance):
     def edit_preview(self, session, path, record_id, text) -> None:
         receipt = session.read_record(path, record_id).receipt
         md_path = receipt.backend_ids["path"].removesuffix(".json") + ".md"
-        entries = session._listing(path)
-        session._put(
-            md_path,
-            text.encode(),
-            sha=entries[f"{record_id}.md"].sha,
-            message="Edit the preview by hand (MetaRelay live test)",
-            action="edit the preview",
+        session._commit(
+            session._head(),
+            {md_path: text.encode()},
+            "Edit the preview by hand (MetaRelay live test)",
+            "edit the preview",
+        )
+
+    def replace_in_preview(self, session, path, record_id, old, new) -> None:
+        receipt = session.read_record(path, record_id).receipt
+        md_path = receipt.backend_ids["path"].removesuffix(".json") + ".md"
+        snapshot = session._head()
+        md_entry = session._folder(snapshot, path)[f"{record_id}.md"]
+        text = session._blob(md_entry.sha, "read the preview").decode()
+        session._commit(
+            snapshot,
+            {md_path: text.replace(old, new).encode()},
+            "Edit a preview value by hand (MetaRelay live test)",
+            "edit the preview",
         )

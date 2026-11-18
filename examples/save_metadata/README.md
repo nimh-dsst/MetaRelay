@@ -133,7 +133,7 @@ uv run python -m examples.save_metadata github://my-lab/metadata@main/records
 ```
 
 The record is `records/Fiber study/Cohort A/implant-M1.json` in the
-repository, with `implant-M1.md` beside it, each written as a commit. Then
+repository, with `implant-M1.md` beside it, written in one commit. Then
 open it with the [`open_github_repo` example](../open_github_repo/README.md).
 
 For real GitHub, set `METARELAY_GITHUB_TOKEN` to a token with **Contents:
