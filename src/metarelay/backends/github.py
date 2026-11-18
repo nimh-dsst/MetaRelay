@@ -34,20 +34,20 @@ Layout (plan §3.3), the same as the local backend::
     ``.metarelay.json`` into a new one.
 
 Conflicts
-    The conflict token is the record file's blob ``sha``. Every write sends
-    the ``sha`` it read, so GitHub refuses it (``ConflictError``) if the file
-    changed in between, and ``create`` mode is enforced: a ``PUT`` without a
-    ``sha`` fails if the file exists.
+    The conflict token is the record file's blob ``sha``. A write reads the
+    branch head, asks ``decide_write`` about the record and preview as they
+    are in that commit, and commits the record, preview, and index together
+    on top of it. The branch is moved only if it still points at that head
+    (a fast forward), so nothing lands on a change MetaRelay didn't see.
 
 Limits
     - GitHub is for metadata. ``write_file`` refuses files larger than
       ``GitHubConfig.max_file_bytes`` (1 MB by default).
-    - Each changed file is its own commit through the Contents API, so a
-      record write is up to three commits (record, preview, index).
-    - GitHub lists at most 1,000 entries in one folder.
+    - Each write is one commit, through the Git Data API. A write that
+      changes nothing makes none.
     - Names are refused if they would break a checkout on macOS or Windows
       (see ``check_local_name``), or differ only in case from a name already
-      there.
+      there. The prefix in the URI is checked the same way.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import quote, unquote, urlsplit
 
 import httpx
@@ -100,16 +100,16 @@ INDEX_VERSION = 1
 DEFAULT_MAX_FILE_BYTES = 1024 * 1024
 HARD_MAX_FILE_BYTES = 50 * 1024 * 1024
 """GitHub warns about files over 50 MB and rejects them over 100 MB."""
-_INDEX_RETRIES = 5
 _BRANCH_RETRIES = 6
 _BRANCH_BACKOFF = 0.25
 """Seconds before the first retry when other commits moved the branch; doubles each time."""
-_LISTING_CAP = 1000
-"""The Contents API lists at most this many entries in a folder."""
+_CACHE_LIMIT = 1024
+"""Git objects kept per session, per kind. They never change, so any is safe to keep."""
 
 _OWNER = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,38})$")
 _REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_T = TypeVar("_T")
 
 
 class GitHubConfig(TokenConfig):
@@ -199,6 +199,13 @@ def _parse(destination: Destination) -> _Address:
     except ValidationError as error:
         raise ConfigurationError(f"The prefix in {destination.uri} is not valid: {error}") from None
     parts = tuple(_nfc(part) for part in prefix.parts)
+    for part in parts:
+        try:
+            check_local_name(part, "Prefix folder")
+        except ValidationError as error:
+            raise ConfigurationError(
+                f"The prefix in {destination.uri} is not valid: {error}"
+            ) from None
     return _Address(owner=owner, repo=repo, branch=branch, prefix=parts)
 
 
@@ -242,29 +249,28 @@ def _raise_for(response: httpx.Response, action: str) -> None:
             f"GitHub refused to {action}{detail} The token needs Contents: read and "
             "write access to this repository."
         )
+    lower = message.lower()
     if status == 404:
         raise NotFoundError(f"GitHub could not find what it needed to {action}.")
-    if status == 409 and "but expected" in message.lower():
-        # "<ref> is at <sha> but expected <sha>": another commit (to any file)
-        # landed on the branch at the same moment. Not a conflict on ours.
+    if status == 422 and any(
+        words in lower
+        for words in ("fast forward", "reference cannot be updated", "reference update failed")
+    ):
+        # Another commit (to any file) landed on the branch after MetaRelay
+        # read it. Not a conflict on ours: read again and retry.
         raise _BranchMoved(
             f"Other commits kept landing on the branch while MetaRelay tried to {action}. "
             "Try again."
         )
-    if status == 409 and "does not match" not in message.lower():
-        if any(word in message.lower() for word in ("pull request", "protected", "rule")):
-            raise PermissionDeniedError(
-                f"GitHub refused to {action}{detail} The branch is protected; use a branch "
-                "that takes direct commits."
-            )
-        raise BackendUnavailableError(f"GitHub refused to {action}{detail}")
-    if status == 409:
-        raise ConflictError(
-            f"Could not {action}: it changed at GitHub since MetaRelay read it. "
-            "Read it again, then write."
+    if status in {409, 422} and any(w in lower for w in ("pull request", "protected", "rule")):
+        raise PermissionDeniedError(
+            f"GitHub refused to {action}{detail} The branch is protected; use a branch "
+            "that takes direct commits."
         )
-    if status == 422 and "sha" in message.lower():
-        raise ConflictError(f"Could not {action}: it already exists at GitHub.")
+    if status == 409 and "empty" in lower:
+        raise NotFoundError(f"The repository is empty, so MetaRelay could not {action}.")
+    if status == 409:
+        raise BackendUnavailableError(f"GitHub refused to {action}{detail}")
     if status == 422:
         raise ValidationError(f"GitHub refused to {action}{detail}")
     if status >= 500:
@@ -323,13 +329,58 @@ def _twin(entries: Mapping[str, _Entry], name: str) -> str | None:
     return None
 
 
+def _parse_record(data: bytes) -> Record | None:
+    try:
+        return Record.model_validate_json(data)
+    except ValidationError:
+        return None
+
+
+def _remember(cache: dict[str, Any], key: str, value: Any) -> None:
+    if len(cache) >= _CACHE_LIMIT:
+        cache.clear()
+    cache[key] = value
+
+
+def _pin(pinned: dict[str, str | None], seen: Mapping[str, str | None], action: str) -> None:
+    """Refuse a retry if a file the write touches changed since the first attempt.
+
+    The first attempt records each file's blob ``sha`` (``None`` if absent).
+    A retry after the branch moved may commit on top of other people's
+    changes, but not on top of a change to these files.
+    """
+    if not pinned:
+        pinned.update(seen)
+        return
+    for name, sha in seen.items():
+        if sha == pinned[name]:
+            continue
+        if pinned[name] is None:
+            raise ConflictError(
+                f"Could not {action}: {name!r} already exists at GitHub. It was created "
+                "while MetaRelay was writing."
+            )
+        raise ConflictError(
+            f"Could not {action}: {name!r} changed at GitHub since MetaRelay read it. "
+            "Read it again, then write."
+        )
+
+
 @dataclass(frozen=True)
 class _Entry:
-    kind: str  # "file" or "dir"
+    kind: str  # "file", "dir", or "other" (a submodule)
     sha: str
     stored: str = ""
     """The name as committed. Entries are keyed by its NFC form; they differ
     for a name committed in NFD (some Linux tools do this)."""
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    """One commit on the branch. Every read in an operation comes from it."""
+
+    commit: str
+    tree: str
 
 
 @dataclass
@@ -349,22 +400,6 @@ class _Index:
         return (json.dumps(content, indent=2, ensure_ascii=False) + "\n").encode()
 
 
-def _saved_but(
-    error: MetaRelayError, record_id: str, step: str, receipt: Receipt
-) -> MetaRelayError:
-    """``error``, raised after the record itself was saved.
-
-    Same class, so callers' handling still applies, with a message that says
-    the record was saved, and the new receipt as ``error.receipt``.
-    """
-    new = type(error)(
-        f"The record {record_id!r} was saved, but updating {step} failed: {error} "
-        "Write the record again, with error.receipt as prior_receipt, to finish."
-    )
-    new.receipt = receipt  # type: ignore[attr-defined]
-    return new
-
-
 class GitHubSession:
     """A session on a GitHub repository. Create it with ``connect("github://...")``."""
 
@@ -373,7 +408,14 @@ class GitHubSession:
         self._address = address
         self._max_file_bytes = max_file_bytes
         self._repo_url = f"/repos/{quote(address.owner)}/{quote(address.repo)}"
+        self._ref_path = f"heads/{quote(address.branch)}"
         self._blobs: dict[str, bytes] = {}
+        self._trees: dict[str, dict[str, _Entry]] = {}
+        self._commit_trees: dict[str, str] = {}
+        self._latest: str | None = None
+        """The last commit this session landed."""
+        self._replaced: dict[str, None] = {}
+        """Commits this session's own commits replaced on the branch (an ordered set)."""
         self._closed = False
 
     @property
@@ -384,7 +426,7 @@ class GitHubSession:
 
     def list_containers(self, parent: LogicalPath = ROOT) -> list[Container]:
         parent = _nfc_path(parent)
-        entries = self._folder(parent)
+        entries = self._folder(self._head(), parent)
         names = sorted(
             name for name, entry in entries.items() if entry.kind == "dir" and _name_ok(name)
         )
@@ -394,8 +436,11 @@ class GitHubSession:
         # Every container is a folder here, so holds_records changes nothing.
         path = _nfc_path(path)
         self._check_names(path)
-        for _ in range(2):  # a second pass if someone created it at the same moment
-            entries = self._listing(ROOT) or {}
+        where = f"create {self._describe(path)}"
+
+        def attempt() -> Container:
+            snapshot = self._head()
+            entries = self._listing(snapshot, ROOT) or {}
             for depth, part in enumerate(path.parts):
                 here = LogicalPath(path.parts[: depth + 1])
                 entry = entries.get(part)
@@ -406,22 +451,20 @@ class GitHubSession:
                     raise ValidationError(f"{self._describe(here)} is a file, not a folder.")
                 self._refuse_other_form(entry, part)
                 if depth < len(path.parts) - 1:
-                    entries = self._listing(here) or {}
+                    entries = self._listing(snapshot, here) or {}
             else:
                 return Container(path=path)
-            # Writing the index creates the folder and every missing parent.
-            try:
-                self._put(
-                    self._git_path(path, INDEX_FILE),
-                    _Index(records={}, files=[], sha=None).to_bytes(),
-                    sha=None,
-                    message=f"MetaRelay: create {self._describe(path)}",
-                    action=f"create {self._describe(path)}",
-                )
-            except ConflictError:
-                continue
+            # Git has no empty folders: the index creates the folder and its parents.
+            index = _Index(records={}, files=[], sha=None).to_bytes()
+            self._commit(
+                snapshot,
+                {self._git_path(path, INDEX_FILE): index},
+                f"MetaRelay: create {self._describe(path)}",
+                where,
+            )
             return Container(path=path)
-        raise ConflictError(f"{self._describe(path)} kept changing while MetaRelay created it.")
+
+        return self._with_retries(where, attempt)
 
     # Records
 
@@ -438,29 +481,13 @@ class GitHubSession:
         json_name, md_name = f"{record_id}.json", f"{record_id}.md"
         if not _name_ok(md_name) or not _name_ok(json_name):
             raise ValidationError(f"Record ID {record_id!r} is too long to use as a file name.")
-        entries = self._folder(path)
-        index = self._index(path, entries)
-        self._refuse_name_clash(entries, index, record_id)
-        json_entry, md_entry = entries.get(json_name), entries.get(md_name)
-        for name, entry in ((json_name, json_entry), (md_name, md_entry)):
-            if entry is not None and entry.kind != "file":
-                raise ValidationError(f"{name!r} is a folder at the destination.")
         where = f"write {record_id!r} in {self._describe(path)}"
-
-        remote_bytes = self._blob(json_entry.sha, where) if json_entry else None
-        remote_preview = self._blob(md_entry.sha, where) if md_entry else None
-        remote_preview_sum = (
-            preview_checksum(remote_preview.decode(errors="replace"))
-            if remote_preview is not None
-            else None
-        )
-        action = decide_write(  # also rejects an unknown mode
-            mode=mode,
-            local_checksum=record_checksum(record),
-            remote_checksum=self._checksum_of(remote_bytes) if remote_bytes is not None else None,
-            prior_receipt=prior_receipt,
-            remote_preview_checksum=remote_preview_sum,
-        )
+        json_path, md_path = self._git_path(path, json_name), self._git_path(path, md_name)
+        index_path = self._git_path(path, INDEX_FILE)
+        data = (record.model_dump_json(indent=2) + "\n").encode()
+        markdown = render_preview(record).markdown
+        preview, new_preview_sum = markdown.encode(), preview_checksum(markdown)
+        pinned: dict[str, str | None] = {}
 
         def receipt(token: str, preview_sum: str | None) -> Receipt:
             return Receipt(
@@ -473,99 +500,92 @@ class GitHubSession:
                 checksum=record_checksum(record),
                 conflict_token=token,
                 preview_checksum=preview_sum,
-                backend_ids={"path": self._git_path(path, json_name)},
+                backend_ids={"path": json_path},
             )
 
-        preview = render_preview(record).markdown
-        new_preview_sum = preview_checksum(preview)
-        written_preview = self._written_preview(index, record_id)
-        if action is WriteAction.WRITE:
-            data = (record.model_dump_json(indent=2) + "\n").encode()
-            verb = "create" if json_entry is None else "update"
-            token = self._put_if_changed(
-                self._git_path(path, json_name),
-                data,
-                json_entry,
-                message=f"MetaRelay: {verb} record {record_id} in {self._describe(path)}",
-                action=where,
+        def attempt() -> Receipt:
+            snapshot = self._head()
+            entries = self._folder(snapshot, path)
+            index = self._index(path, entries)
+            self._refuse_name_clash(entries, index, record_id)
+            json_entry, md_entry = entries.get(json_name), entries.get(md_name)
+            for name, entry in ((json_name, json_entry), (md_name, md_entry)):
+                if entry is not None and entry.kind != "file":
+                    raise ValidationError(f"{name!r} is a folder at the destination.")
+            _pin(
+                pinned,
+                {
+                    json_name: json_entry.sha if json_entry else None,
+                    md_name: md_entry.sha if md_entry else None,
+                },
+                where,
             )
-            # The record is saved. Each step below is another commit, so a
-            # failure from here on must say so and hand back the receipt.
-            try:
-                self._put_if_changed(
-                    self._git_path(path, md_name),
-                    preview.encode(),
-                    md_entry,
-                    message=f"MetaRelay: preview of {record_id} in {self._describe(path)}",
-                    action=f"write the preview of {record_id!r}",
-                )
-            except ConflictError:
-                error = ConflictError(
-                    f"The record {record_id!r} was saved, but its preview was edited at GitHub "
-                    "while MetaRelay was writing it. Read the record, then write again with "
-                    "mode='force' to replace the edited preview."
-                )
-                error.receipt = receipt(token, written_preview)  # type: ignore[attr-defined]
-                raise error from None
-            except MetaRelayError as error:
-                raise _saved_but(
-                    error, record_id, "its preview", receipt(token, written_preview)
-                ) from None
-            written_preview = new_preview_sum
-        else:
-            if json_entry is None:  # SKIP means the record is there
-                raise BackendUnavailableError(
-                    f"GitHub's listing changed while MetaRelay tried to {where}. Try again."
-                )
-            token = json_entry.sha
-            if (
-                prior_receipt is not None
-                and remote_preview_sum is not None
-                and remote_preview_sum == prior_receipt.preview_checksum
-            ):
-                # The caller's receipt says MetaRelay wrote this preview, even
-                # if the index missed it (an earlier write failed partway).
-                written_preview = remote_preview_sum
-            # Same content: leave the record alone. Restore a missing preview
-            # and refresh a stale one MetaRelay wrote; an edited one is kept.
-            stale = remote_preview_sum is not None and remote_preview_sum == written_preview
-            if md_entry is None or (stale and remote_preview_sum != new_preview_sum):
-                self._put(
-                    self._git_path(path, md_name),
-                    preview.encode(),
-                    sha=md_entry.sha if md_entry else None,
-                    message=f"MetaRelay: restore preview of {record_id}",
-                    action=f"restore the preview of {record_id!r}",
-                )
+
+            remote_bytes = self._blob(json_entry.sha, where) if json_entry else None
+            remote_preview = self._blob(md_entry.sha, where) if md_entry else None
+            remote_preview_sum = (
+                preview_checksum(remote_preview.decode(errors="replace"))
+                if remote_preview is not None
+                else None
+            )
+            action = decide_write(  # also rejects an unknown mode
+                mode=mode,
+                local_checksum=record_checksum(record),
+                remote_checksum=self._checksum_of(remote_bytes)
+                if remote_bytes is not None
+                else None,
+                prior_receipt=prior_receipt,
+                remote_preview_checksum=remote_preview_sum,
+            )
+
+            written_preview = self._written_preview(index, record_id)
+            changes: dict[str, bytes] = {}
+            if action is WriteAction.WRITE:
+                verb = "create" if json_entry is None else "update"
+                message = f"MetaRelay: {verb} record {record_id} in {self._describe(path)}"
+                token = _git_sha(data)
+                if json_entry is None or json_entry.sha != token:
+                    changes[json_path] = data
+                if md_entry is None or md_entry.sha != _git_sha(preview):
+                    changes[md_path] = preview
                 written_preview = new_preview_sum
-        if written_preview is not None:
-            remembered = {"preview_checksum": written_preview}
-            if index.sha is None or index.records.get(record_id) != remembered:
-                try:
-                    self._update_index(
-                        path,
-                        lambda latest: latest.records.update({record_id: remembered}),
-                        current=index,
-                    )
-                except MetaRelayError as error:
-                    raise _saved_but(
-                        error,
-                        record_id,
-                        f"the index ({INDEX_FILE})",
-                        receipt(token, written_preview),
-                    ) from None
-        else:
-            written_preview = remote_preview_sum
+            else:
+                # SKIP: the same record is there, so json_entry exists.
+                assert json_entry is not None
+                message = f"MetaRelay: restore the preview of {record_id}"
+                token = json_entry.sha
+                # Leave the record alone. Restore a missing preview and refresh
+                # a stale one MetaRelay wrote; an edited one is kept.
+                stale = remote_preview_sum is not None and remote_preview_sum == written_preview
+                if md_entry is None or (stale and remote_preview_sum != new_preview_sum):
+                    changes[md_path] = preview
+                    written_preview = new_preview_sum
+            if written_preview is not None:
+                remembered = {"preview_checksum": written_preview}
+                if index.sha is None or index.records.get(record_id) != remembered:
+                    index.records[record_id] = remembered
+                    changes[index_path] = index.to_bytes()
+                    if len(changes) == 1:
+                        message = f"MetaRelay: update the index of {self._describe(path)}"
+            else:
+                written_preview = remote_preview_sum
 
-        return receipt(token, written_preview)
+            if changes:
+                self._commit(snapshot, changes, message, where)
+                for content in changes.values():
+                    _remember(self._blobs, _git_sha(content), content)
+            return receipt(token, written_preview)
+
+        return self._with_retries(where, attempt)
 
     def read_record(self, path: LogicalPath, record_id: str) -> StoredRecord:
         path = _nfc_path(path)
+        snapshot = self._head()
         if not _name_ok(record_id) or not _name_ok(f"{record_id}.json"):
             # Still report a missing container as such.
-            self._folder(path)
+            self._folder(snapshot, path)
             raise NotFoundError(f"No record {record_id!r} in {self._describe(path)}.")
-        entries = self._folder(path)
+        entries = self._folder(snapshot, path)
         index = self._index(path, entries)
         if _fold(f"{record_id}.json") in {_fold(name) for name in index.files}:
             raise NotFoundError(f"No record {record_id!r} in {self._describe(path)}.")
@@ -573,7 +593,7 @@ class GitHubSession:
 
     def list_records(self, path: LogicalPath) -> list[StoredRecord]:
         path = _nfc_path(path)
-        entries = self._folder(path)
+        entries = self._folder(self._head(), path)
         index = self._index(path, entries)
         found = []
         for record_id in self._record_ids(entries, index):
@@ -583,9 +603,9 @@ class GitHubSession:
                 continue  # in the index, but deleted by hand
             except ValidationError:
                 # A .json MetaRelay never indexed that isn't a record
-                # (package.json at a repository root) is someone else's file,
-                # even where MetaRelay hasn't written yet. A damaged record
-                # MetaRelay wrote still fails loudly, and read_record of it too.
+                # (package.json at a repository root) is someone else's file.
+                # A damaged record MetaRelay wrote still fails loudly, and
+                # read_record of it too.
                 if record_id not in index.records:
                     continue
                 raise
@@ -610,62 +630,55 @@ class GitHubSession:
                 f"to {_size(self._max_file_bytes)} (GitHubConfig.max_file_bytes). GitHub is "
                 "for metadata: keep large files in your data store and record where they are."
             )
-        entries = self._folder(path)
-        index = self._index(path, entries)
-        entry = entries.get(name)
-        if entry is not None and entry.kind != "file":
-            raise ValidationError(f"{name!r} is a folder at the destination.")
-        self._refuse_other_form(entry, name)
-        twin = _twin(entries, name)
-        if twin is not None:
-            raise ValidationError(
-                f"{name!r} differs only in case from {twin!r}, which is already here. "
-                "Use the same spelling, or another name."
-            )
-        owned = {
-            _fold(f"{record_id}{suffix}")
-            for record_id in self._record_ids(entries, index)
-            for suffix in (".json", ".md")
-        }
-        if _fold(name) in owned:
-            raise ValidationError(
-                f"{name!r} is a record's file name. Use another name for this file."
+        where = f"write {name!r} in {self._describe(path)}"
+        sha = _git_sha(data)
+        pinned: dict[str, str | None] = {}
+
+        def attempt() -> FileReceipt:
+            snapshot = self._head()
+            entries = self._folder(snapshot, path)
+            index = self._index(path, entries)
+            entry = entries.get(name)
+            if entry is not None and entry.kind != "file":
+                raise ValidationError(f"{name!r} is a folder at the destination.")
+            self._refuse_other_form(entry, name)
+            twin = _twin(entries, name)
+            if twin is not None:
+                raise ValidationError(
+                    f"{name!r} differs only in case from {twin!r}, which is already here. "
+                    "Use the same spelling, or another name."
+                )
+            if self._is_records_file(path, entries, index, name):
+                raise ValidationError(
+                    f"{name!r} is a record's file name. Use another name for this file."
+                )
+            _pin(pinned, {name: entry.sha if entry else None}, where)
+
+            # The file and its line in the index land in one commit, so an
+            # upload is never mistaken for a record.
+            changes: dict[str, bytes] = {}
+            if entry is None or entry.sha != sha:
+                changes[self._git_path(path, name)] = data
+            if name not in index.files:
+                index.files.append(name)
+                index_bytes = index.to_bytes()
+                changes[self._git_path(path, INDEX_FILE)] = index_bytes
+                _remember(self._blobs, _git_sha(index_bytes), index_bytes)
+            if changes:
+                self._commit(
+                    snapshot, changes, f"MetaRelay: write {name} in {self._describe(path)}", where
+                )
+            return FileReceipt(
+                destination=self.destination,
+                backend=BACKEND_NAME,
+                container=Container(path=path),
+                name=name,
+                checksum=_sha256(data),
+                size=len(data),
+                native_id=sha,
             )
 
-        # Index first, so the upload is never mistaken for a record. If the
-        # upload fails, take a name it added back out: the files list decides
-        # what counts as a record, so a stray name would hide one. Not after a
-        # conflict: then someone else's upload of the same name holds it now.
-        newly_listed = name not in index.files
-        self._update_index(path, lambda latest: latest.files.append(name), current=index)
-        try:
-            sha = self._put_if_changed(
-                self._git_path(path, name),
-                data,
-                entry,
-                message=f"MetaRelay: write {name} in {self._describe(path)}",
-                action=f"write {name!r} in {self._describe(path)}",
-                cache=False,
-            )
-        except ConflictError:
-            raise
-        except MetaRelayError:
-            if newly_listed and entry is None:
-                with contextlib.suppress(MetaRelayError):
-                    self._update_index(
-                        path,
-                        lambda latest: latest.files.remove(name) if name in latest.files else None,
-                    )
-            raise
-        return FileReceipt(
-            destination=self.destination,
-            backend=BACKEND_NAME,
-            container=Container(path=path),
-            name=name,
-            checksum=_sha256(data),
-            size=len(data),
-            native_id=sha,
-        )
+        return self._with_retries(where, attempt)
 
     def close(self) -> None:
         if not self._closed:
@@ -680,7 +693,6 @@ class GitHubSession:
         url: str,
         action: str,
         *,
-        params: Mapping[str, str] | None = None,
         body: Mapping[str, Any] | None = None,
         missing_ok: bool = False,
     ) -> Any:
@@ -688,11 +700,7 @@ class GitHubSession:
         if self._closed:
             raise ConfigurationError("This GitHub session is closed. Connect again.")
         with _network_errors(action):
-            response = self._http.request(method, url, params=params, json=body)
-            if response.status_code == 404 and "no commit found for the ref" in (
-                _github_message(response).lower()
-            ):
-                raise NotFoundError(self._branch_gone())
+            response = self._http.request(method, url, json=body)
             if missing_ok and response.status_code == 404:
                 return None
             _raise_for(response, action)
@@ -701,95 +709,86 @@ class GitHubSession:
     def _git_path(self, path: LogicalPath, *names: str) -> str:
         return "/".join((*self._address.prefix, *path.parts, *names))
 
-    def _contents_url(self, git_path: str) -> str:
-        if not git_path:
-            return f"{self._repo_url}/contents"
-        return f"{self._repo_url}/contents/{quote(git_path)}"
+    # Reading one commit
 
-    def _listing(self, path: LogicalPath) -> dict[str, _Entry] | None:
-        """The folder at ``path``, ``NFC name -> entry``, or ``None`` if it doesn't exist."""
-        action = f"list {self._describe(path)}"
-        found = self._raw_listing(self._git_path(path), action)
-        if found is None:
-            return None
-        with _network_errors(action):
-            return {
-                _nfc(item["name"]): _Entry(
-                    kind="dir" if item["type"] in {"dir", "tree"} else "file",
-                    sha=item["sha"],
-                    stored=item["name"],
-                )
-                for item in found
-            }
-
-    def _raw_listing(self, git_path: str, action: str) -> list[dict[str, Any]] | None:
-        """GitHub's entries for the folder at ``git_path``, or ``None`` if missing.
-
-        The Contents API stops at 1,000 entries, so a folder that big is read
-        again with the Git Trees API, which has no such cap.
-        """
-        found = self._request(
-            "GET",
-            self._contents_url(git_path),
-            action,
-            params={"ref": self._address.branch},
-            missing_ok=True,
+    def _head(self) -> _Snapshot:
+        """The commit the branch points at now."""
+        action = f"read the branch {self._address.branch!r}"
+        ref = self._request(
+            "GET", f"{self._repo_url}/git/ref/{self._ref_path}", action, missing_ok=True
         )
-        if found is None:
-            return None
-        if not isinstance(found, list):
-            raise ValidationError(f"{git_path or 'The destination root'} is a file, not a folder.")
-        if len(found) < _LISTING_CAP:
-            return found
-        tree = self._request(
-            "GET", f"{self._repo_url}/git/trees/{self._tree_sha(git_path, action)}", action
-        )
+        if ref is None:
+            raise NotFoundError(self._branch_gone())
         with _network_errors(action):
-            if tree.get("truncated"):
-                raise ValidationError(
-                    f"{git_path} holds more entries than GitHub can list. Split it into folders."
-                )
-            return [
-                {"name": item["path"], "type": item["type"], "sha": item["sha"]}
-                for item in tree["tree"]
-            ]
-
-    def _tree_sha(self, git_path: str, action: str) -> str:
-        """The Git tree ID of the folder at ``git_path``."""
-        if not git_path:
-            branch = self._request(
-                "GET", f"{self._repo_url}/branches/{quote(self._address.branch)}", action
-            )
+            commit = ref["object"]["sha"]
+            if not isinstance(commit, str):
+                raise TypeError
+        if commit in self._replaced and self._latest is not None:
+            # GitHub can answer from a replica that hasn't seen our last
+            # commit yet. Never read from before our own writes. If the
+            # branch has really moved past ours, the next commit isn't a
+            # fast forward and is retried from a fresh read.
+            commit = self._latest
+        tree = self._commit_trees.get(commit)
+        if tree is None:
+            found = self._request("GET", f"{self._repo_url}/git/commits/{commit}", action)
             with _network_errors(action):
-                sha = branch["commit"]["commit"]["tree"]["sha"]
-                if not isinstance(sha, str):
+                tree = found["tree"]["sha"]
+                if not isinstance(tree, str):
                     raise TypeError
-                return sha
-        parent, _, name = git_path.rpartition("/")
-        for item in self._raw_listing(parent, action) or []:
-            if item.get("name") == name and item.get("type") in {"dir", "tree"}:
-                return str(item["sha"])
-        raise NotFoundError(f"GitHub could not find what it needed to {action}.")
+            _remember(self._commit_trees, commit, tree)
+        return _Snapshot(commit=commit, tree=tree)
 
-    def _folder(self, path: LogicalPath) -> dict[str, _Entry]:
+    def _tree(self, sha: str, where: str) -> dict[str, _Entry]:
+        """One folder of a commit, ``NFC name -> entry``. Trees never change, so cached."""
+        cached = self._trees.get(sha)
+        if cached is not None:
+            return cached
+        action = f"list {where}"
+        found = self._request("GET", f"{self._repo_url}/git/trees/{sha}", action)
+        with _network_errors(action):
+            if found.get("truncated"):
+                raise ValidationError(
+                    f"{where} holds more entries than GitHub can list. Split it into folders."
+                )
+            kinds = {"tree": "dir", "blob": "file"}
+            entries = {
+                _nfc(item["path"]): _Entry(
+                    kind=kinds.get(item["type"], "other"), sha=item["sha"], stored=item["path"]
+                )
+                for item in found["tree"]
+            }
+        _remember(self._trees, sha, entries)
+        return entries
+
+    def _listing(self, snapshot: _Snapshot, path: LogicalPath) -> dict[str, _Entry] | None:
+        """The folder at ``path`` in ``snapshot``, or ``None`` if it doesn't exist."""
+        entries = self._tree(snapshot.tree, "the repository root")
+        walked: list[str] = []
+        for part in (*self._address.prefix, *path.parts):
+            walked.append(part)
+            entry = entries.get(part)
+            if entry is None or entry.stored != part:
+                return None  # missing, or committed in another Unicode form
+            if entry.kind != "dir":
+                raise ValidationError(f"{'/'.join(walked)} is a file, not a folder.")
+            entries = self._tree(entry.sha, "/".join(walked))
+        return entries
+
+    def _folder(self, snapshot: _Snapshot, path: LogicalPath) -> dict[str, _Entry]:
         """The folder at ``path``. Raises ``NotFoundError`` if it doesn't exist.
 
         The destination root always exists, even before anything is written
         under the prefix.
         """
         self._check_names(path)
-        entries = self._listing(path)
+        entries = self._listing(snapshot, path)
         if entries is not None:
             return entries
         if not path.parts:
-            # The prefix isn't created yet, or the repository is gone. Tell
-            # them apart, so lost access never reads as an empty destination.
-            branch_url = f"{self._repo_url}/branches/{quote(self._address.branch)}"
-            if self._request("GET", branch_url, "open the branch", missing_ok=True) is None:
-                raise NotFoundError(self._branch_gone())
-            return {}
+            return {}  # the prefix isn't created yet
         # Explain why: a name that differs only in case is the usual reason.
-        parent = self._listing(path.parent)
+        parent = self._listing(snapshot, path.parent)
         if parent is not None:
             self._refuse_other_form(parent.get(path.name), path.name)
             self._refuse_twin(parent, path.name, path)
@@ -819,69 +818,79 @@ class GitHubSession:
             raise BackendUnavailableError(
                 f"GitHub sent damaged content while MetaRelay tried to {action}."
             )
-        if len(self._blobs) > 1024:
-            self._blobs.clear()
-        self._blobs[sha] = data
+        _remember(self._blobs, sha, data)
         return data
 
-    def _put(
-        self,
-        git_path: str,
-        data: bytes,
-        *,
-        sha: str | None,
-        message: str,
-        action: str,
-        cache: bool = True,
-    ) -> str:
-        """Create or replace a file in one commit. Returns its new blob ``sha``."""
-        body: dict[str, Any] = {
-            "message": message,
-            "content": base64.b64encode(data).decode(),
-            "branch": self._address.branch,
-        }
-        if sha is not None:
-            body["sha"] = sha
-        for attempt in range(_BRANCH_RETRIES):
-            try:
-                result = self._request("PUT", self._contents_url(git_path), action, body=body)
-                break
-            except _BranchMoved as error:
-                # The request still names the file's sha, so resending can't
-                # overwrite someone else's change to this file.
-                if attempt == _BRANCH_RETRIES - 1:
-                    raise BackendUnavailableError(str(error)) from None
-                delay = _BRANCH_BACKOFF * 2**attempt
-                time.sleep(delay + random.uniform(0, delay))
-        with _network_errors(action):
-            new_sha = result["content"]["sha"]
-            if not isinstance(new_sha, str):
-                raise TypeError
-        if cache:  # records, previews and indexes, which are read back; not uploads
-            self._blobs[new_sha] = data
-        return new_sha
+    # Writing one commit
 
-    def _put_if_changed(
-        self,
-        git_path: str,
-        data: bytes,
-        entry: _Entry | None,
-        *,
-        message: str,
-        action: str,
-        cache: bool = True,
+    def _commit(
+        self, snapshot: _Snapshot, changes: Mapping[str, bytes], message: str, action: str
     ) -> str:
-        """``_put``, skipped (no empty commit) when the file already holds ``data``."""
-        if entry is not None and entry.sha == _git_sha(data):
-            return entry.sha
-        return self._put(
-            git_path,
-            data,
-            sha=entry.sha if entry else None,
-            message=message,
-            action=action,
-            cache=cache,
+        """Commit ``changes`` (``git path -> bytes``) on top of ``snapshot``.
+
+        Moves the branch only if it still points at ``snapshot``; raises
+        ``_BranchMoved`` otherwise, and nothing lands. Returns the commit ID.
+        """
+        items = []
+        for git_path, data in sorted(changes.items()):
+            item: dict[str, Any] = {"path": git_path, "mode": "100644", "type": "blob"}
+            text = None
+            if b"\0" not in data:
+                with contextlib.suppress(UnicodeDecodeError):
+                    text = data.decode("utf-8")
+            if text is not None:
+                item["content"] = text  # the tree API takes text inline
+            else:
+                blob = self._request(
+                    "POST",
+                    f"{self._repo_url}/git/blobs",
+                    action,
+                    body={"content": base64.b64encode(data).decode(), "encoding": "base64"},
+                )
+                with _network_errors(action):
+                    item["sha"] = str(blob["sha"])
+            items.append(item)
+        tree = self._request(
+            "POST",
+            f"{self._repo_url}/git/trees",
+            action,
+            body={"base_tree": snapshot.tree, "tree": items},
         )
+        with _network_errors(action):
+            tree_sha = str(tree["sha"])
+        commit = self._request(
+            "POST",
+            f"{self._repo_url}/git/commits",
+            action,
+            body={"message": message, "tree": tree_sha, "parents": [snapshot.commit]},
+        )
+        with _network_errors(action):
+            commit_sha = str(commit["sha"])
+        self._request(
+            "PATCH",
+            f"{self._repo_url}/git/refs/{self._ref_path}",
+            action,
+            body={"sha": commit_sha, "force": False},
+        )
+        _remember(self._commit_trees, commit_sha, tree_sha)
+        _remember(self._replaced, snapshot.commit, None)
+        if self._latest is not None:
+            _remember(self._replaced, self._latest, None)
+        self._latest = commit_sha
+        return commit_sha
+
+    def _with_retries(self, action: str, attempt: Callable[[], _T]) -> _T:
+        """Run ``attempt`` (read the head, decide, commit) again while the branch
+        keeps moving under it, waiting a little longer each time."""
+        for number in range(_BRANCH_RETRIES):
+            try:
+                return attempt()
+            except _BranchMoved as error:
+                if number == _BRANCH_RETRIES - 1:
+                    raise BackendUnavailableError(str(error)) from None
+                delay = _BRANCH_BACKOFF * 2**number
+                time.sleep(delay + random.uniform(0, delay))
+        raise AssertionError("unreachable")
 
     # The index
 
@@ -905,46 +914,6 @@ class GitHubSession:
                 "MetaRelay then treats every .json file there as a record."
             ) from None
         return _Index(records=records, files=files, sha=entry.sha)
-
-    def _update_index(
-        self,
-        path: LogicalPath,
-        change: Callable[[_Index], None],
-        *,
-        current: _Index | None = None,
-    ) -> None:
-        """Apply ``change`` to the index, retrying if another writer got there first.
-
-        ``current`` is an index the caller just read; the first attempt uses it
-        instead of reading again. A stale one only costs a retry.
-        """
-        for attempt in range(_INDEX_RETRIES):
-            if attempt == 0 and current is not None:
-                index = _Index(
-                    records=dict(current.records), files=list(current.files), sha=current.sha
-                )
-            else:
-                index = self._index(path, self._folder(path))
-            before = index.to_bytes()
-            change(index)
-            after = index.to_bytes()
-            if index.sha is not None and after == before:
-                return
-            try:
-                self._put(
-                    self._git_path(path, INDEX_FILE),
-                    after,
-                    sha=index.sha,
-                    message=f"MetaRelay: update the index of {self._describe(path)}",
-                    action=f"update the index of {self._describe(path)}",
-                )
-            except ConflictError:
-                continue
-            return
-        raise ConflictError(
-            f"The index of {self._describe(path)} kept changing while MetaRelay updated it. "
-            "Try again."
-        )
 
     def _written_preview(self, index: _Index, record_id: str) -> str | None:
         checksum = index.records.get(record_id, {}).get("preview_checksum")
@@ -971,6 +940,26 @@ class GitHubSession:
                 ids.add(record_id)
         return sorted(rid for rid in ids if _fold(f"{rid}.json") not in files)
 
+    def _is_records_file(
+        self, path: LogicalPath, entries: Mapping[str, _Entry], index: _Index, name: str
+    ) -> bool:
+        """Whether ``name`` is the ``.json`` or ``.md`` of a record here.
+
+        A ``.json`` MetaRelay didn't index counts only if it holds a record,
+        as in ``list_records``: a hand-committed ``config.json`` is a file.
+        """
+        for record_id in self._record_ids(entries, index):
+            if _fold(name) not in {_fold(f"{record_id}.json"), _fold(f"{record_id}.md")}:
+                continue
+            if record_id in index.records:
+                return True
+            entry = entries.get(f"{record_id}.json")
+            if entry is not None and entry.kind == "file":
+                data = self._blob(entry.sha, f"read {record_id!r} in {self._describe(path)}")
+                if _parse_record(data) is not None:
+                    return True
+        return False
+
     # Checks
 
     def _describe(self, path: LogicalPath) -> str:
@@ -982,7 +971,7 @@ class GitHubSession:
 
     def _refuse_other_form(self, entry: _Entry | None, name: str) -> None:
         """Refuse a name committed in another Unicode form (NFD), rather than
-        reading a path that 404s or committing a second, look-alike copy."""
+        reading a path that isn't there or committing a second, look-alike copy."""
         if entry is not None and entry.stored and entry.stored != name:
             raise ValidationError(
                 f"{name!r} is committed at GitHub in a different Unicode form (NFD) than "
@@ -1017,10 +1006,8 @@ class GitHubSession:
 
     def _checksum_of(self, data: bytes) -> str:
         """``record_checksum`` of stored bytes, or a value that matches nothing."""
-        try:
-            return record_checksum(Record.model_validate_json(data))
-        except ValidationError:
-            return "unreadable:" + _sha256(data)
+        record = _parse_record(data)
+        return record_checksum(record) if record is not None else "unreadable:" + _sha256(data)
 
     def _read(
         self, path: LogicalPath, entries: Mapping[str, _Entry], index: _Index, record_id: str
@@ -1100,17 +1087,13 @@ class GitHubBackend:
             raise ConfigurationError(
                 f"GitHub has no repository {full_name}, or the token can't see it."
             )
-        branch = session._request(
-            "GET",
-            f"{session._repo_url}/branches/{quote(address.branch)}",
-            "open the branch",
-            missing_ok=True,
-        )
-        if branch is None:
+        try:
+            session._head()
+        except NotFoundError:
             raise ConfigurationError(
                 f"{full_name} has no branch {address.branch!r}. Create it first (an empty "
                 "repository needs a first commit)."
-            )
+            ) from None
 
     def begin_login(
         self, destination: Destination, redirect_url: str, config: DestinationConfig | None

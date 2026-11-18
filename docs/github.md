@@ -1,8 +1,8 @@
 # GitHub
 
 The `github://` backend writes records as files in a GitHub repository,
-through the [Contents API](https://docs.github.com/en/rest/repos/contents).
-Labs get a free, versioned, reviewable home for their metadata.
+through the [Git Data API](https://docs.github.com/en/rest/git). Each write
+is one commit. Labs get a free, versioned, reviewable home for their metadata.
 
 ```bash
 pip install 'metarelay[github]'
@@ -74,56 +74,46 @@ wrote it. Git can't store an empty folder, so `ensure_container` writes this
 file into a new folder. If it is deleted, every `.json` file in the folder
 counts as a record again.
 
-In a folder that has an index, a `.json` file MetaRelay didn't write and that
-isn't a record (a `package.json` at the repository root, say) is left out of
-`list_records`, even in a folder MetaRelay hasn't written to. Reading it by name still raises `ValidationError`. Using a
-prefix keeps MetaRelay's files apart from the rest of the repository.
+A `.json` file MetaRelay didn't write and that isn't a record (a
+`package.json` at the repository root, say) is left out of `list_records`,
+even in a folder MetaRelay hasn't written to. Reading it by name still raises
+`ValidationError`, and `write_file` can update it. Using a prefix keeps
+MetaRelay's files apart from the rest of the repository.
 
 Names are matched in Unicode NFC form. A folder or file committed with an
 NFD name (some Linux tools do this) is listed, but opening it or writing to
 it raises `ValidationError` until it is renamed, rather than creating a
 second folder that looks the same.
 
-A folder can hold any number of files. GitHub lists at most 1,000 entries
-through the Contents API, so MetaRelay reads a folder that big again with the
-Git Trees API. `list_records` downloads every record in the folder, one
-request each, so a listing of hundreds of records takes a while and counts
-against GitHub's rate limit (5,000 requests an hour). Use `read_record` when
-you know the ID.
+A folder can hold any number of files. `list_records` downloads every record
+in the folder, one request each, so a listing of hundreds of records takes a
+while and counts against GitHub's rate limit (5,000 requests an hour). Use
+`read_record` when you know the ID.
 
-Each changed file is one commit, so writing a record makes up to three
-(record, preview, index). Writing a record that hasn't changed makes none.
-When another commit lands on the branch at the same moment (two people
-writing at once, even to different files), GitHub refuses the commit and
-MetaRelay sends it again, a few times, waiting a little longer each time.
-Each attempt still names the file's `sha`, so a retry never overwrites a
-change to the same file.
-
-The record is written first. If the preview or index commit then fails, the
-error says the record was saved, and carries the new receipt as
-`error.receipt`. Write the record again with that receipt as `prior_receipt`
-to bring the preview and index up to date:
-
-```python
-try:
-    receipt = session.write_record(path, record, prior_receipt=receipt)
-except MetaRelayError as error:
-    receipt = getattr(error, "receipt", receipt)  # the record may be saved
-    raise
-```
+Each write is one commit: a record, its preview, and the index change land
+together, and a file from `write_file` lands with its line in the index. A
+write that fails leaves the repository as it was. Writing a record that
+hasn't changed makes no commit.
 
 Names that would break a checkout on macOS or Windows (`\ : * ? " < > |`, a
 trailing dot, `CON`) and names that differ only in case from one already
-there are refused, as in the local backend. Names starting with `.` are
+there are refused, as in the local backend. So is a prefix in the URI with
+such a name, as a `ConfigurationError`. Names starting with `.` are
 reserved.
 
 ## Conflicts
 
-The conflict token is the record file's blob `sha`. Every write sends the
-`sha` MetaRelay read, so if anyone changes the file in between, GitHub
-refuses the write and you get `ConflictError` instead of a lost change.
-`mode="create"` is enforced the same way: GitHub refuses to create a file
-that exists.
+The conflict token is the record file's blob `sha`. A write reads the
+branch's latest commit, checks the record and preview there, and makes its
+commit on top of that one. GitHub moves the branch to it only as a fast
+forward, so a write never lands on a change MetaRelay didn't see.
+
+When another commit lands on the branch at the same moment (two people
+writing at once, even to different files), MetaRelay reads the branch again
+and retries, a few times, waiting a little longer each time. A retry keeps
+the other commit. If that commit changed the record or its preview, the
+write raises `ConflictError` instead. `mode="create"` raises `ConflictError`
+if the record exists, even if it was created during the write.
 
 Editing the `.md` preview on github.com is also a `ConflictError` on the next
 write (D7), even if your code read the record after the edit. Keep the edit
@@ -141,9 +131,9 @@ and put its location in the record.
 | --- | --- |
 | 401 | `AuthenticationError` |
 | 403 (rate limit), 429, 5xx, network failure | `BackendUnavailableError` |
-| 409 because other commits kept moving the branch (after retries) | `BackendUnavailableError` |
-| 403 (other), 409 for a protected branch | `PermissionDeniedError` |
-| 409 for a stale `sha`, or 422 for a missing one | `ConflictError` |
+| 422 because other commits kept moving the branch (after retries) | `BackendUnavailableError` |
+| 403 (other), 422 for a protected branch | `PermissionDeniedError` |
+| The record or preview changed during the write | `ConflictError` |
 | Missing repository or branch at `connect()` | `ConfigurationError` |
 
 ## Testing

@@ -297,63 +297,81 @@ def test_a_file_is_not_a_container(session: GitHubSession, fake: FakeGitHub) -> 
 # Conflicts use the blob sha
 
 
+def _before_each_commit(session: GitHubSession, action) -> None:
+    """Run ``action`` just before every commit the session makes: someone else
+    changing the branch between MetaRelay's read and its write."""
+    real_commit = session._commit
+
+    def commit(snapshot, changes, message, where):
+        action(changes)
+        return real_commit(snapshot, changes, message, where)
+
+    session._commit = commit
+
+
+def _once(action):
+    done = []
+
+    def run(changes):
+        if not done:
+            done.append(True)
+            action(changes)
+
+    return run
+
+
 def test_a_change_between_read_and_write_is_a_conflict(
     session: GitHubSession, fake: FakeGitHub, make_record
 ) -> None:
     session.write_record(STUDY, make_record(diameter_um=1))
-    real_listing = session._listing
-
-    def listing_then_someone_writes(path):
-        entries = real_listing(path)
-        if path == STUDY:
-            fake.put_file(
-                REPO, "records/Study/fiber-1.json", make_record(diameter_um=3).model_dump_json()
-            )
-        return entries
-
-    session._listing = listing_then_someone_writes
-    with pytest.raises(ConflictError):
+    theirs = make_record(diameter_um=3).model_dump_json()
+    _before_each_commit(
+        session, _once(lambda _: fake.put_file(REPO, "records/Study/fiber-1.json", theirs))
+    )
+    with pytest.raises(ConflictError, match="changed at GitHub"):
         session.write_record(STUDY, make_record(diameter_um=2), mode=WriteMode.FORCE)
-    session._listing = real_listing
     assert session.read_record(STUDY, "fiber-1").record.payload["diameter_um"] == 3
 
 
 def test_create_is_enforced_by_github(
     session: GitHubSession, fake: FakeGitHub, make_record
 ) -> None:
-    real_listing = session._listing
-
-    def listing_then_someone_creates(path):
-        entries = real_listing(path)
-        if path == STUDY:
-            fake.put_file(REPO, "records/Study/fiber-1.json", make_record().model_dump_json())
-        return entries
-
-    session._listing = listing_then_someone_creates
+    theirs = make_record().model_dump_json()
+    _before_each_commit(
+        session, _once(lambda _: fake.put_file(REPO, "records/Study/fiber-1.json", theirs))
+    )
     with pytest.raises(ConflictError, match="already exists"):
         session.write_record(STUDY, make_record(diameter_um=2), mode=WriteMode.CREATE)
+    assert session.read_record(STUDY, "fiber-1").record.payload["diameter_um"] != 2
 
 
 def test_a_concurrent_index_update_is_retried(
     session: GitHubSession, fake: FakeGitHub, make_record
 ) -> None:
     session.write_record(STUDY, make_record("fiber-1"))
-    real_put = session._put
-    raced = []
+    git_path = f"records/Study/{INDEX_FILE}"
 
-    def put_after_someone_else(git_path, data, **kwargs):
-        if git_path.endswith(INDEX_FILE) and not raced:
-            raced.append(True)
-            index = json.loads(fake.files(REPO)[git_path])
-            index["files"].append("other.csv")
-            fake.put_file(REPO, git_path, json.dumps(index))
-        return real_put(git_path, data, **kwargs)
+    def someone_lists_a_file(_):
+        index = json.loads(fake.files(REPO)[git_path])
+        index["files"].append("other.csv")
+        fake.put_file(REPO, git_path, json.dumps(index))
 
-    session._put = put_after_someone_else
+    _before_each_commit(session, _once(someone_lists_a_file))
     session.write_record(STUDY, make_record("fiber-2"))
-    index = json.loads(fake.files(REPO)[f"records/Study/{INDEX_FILE}"])
+    index = json.loads(fake.files(REPO)[git_path])
     assert set(index["records"]) == {"fiber-1", "fiber-2"}
     assert index["files"] == ["other.csv"]
+
+
+def test_a_commit_elsewhere_on_the_branch_is_not_a_conflict(
+    session: GitHubSession, fake: FakeGitHub, make_record
+) -> None:
+    first = session.write_record(STUDY, make_record())
+    _before_each_commit(session, _once(lambda _: fake.put_file(REPO, "README.md", "# New\n")))
+    session.write_record(STUDY, make_record(diameter_um=200.0), prior_receipt=first)
+    files = fake.files(REPO)
+    assert files["README.md"] == b"# New\n"  # their commit is kept, ours is on top
+    assert "200" in files["records/Study/fiber-1.md"].decode()
 
 
 # Files
@@ -481,27 +499,19 @@ def test_a_protected_branch_is_not_a_conflict(
 ) -> None:
     fake.repo(REPO).protected.add("main")
     before = len(fake.requests)
-    with pytest.raises(PermissionDeniedError, match="pull request"):
+    with pytest.raises(PermissionDeniedError, match="protected"):
         session.write_record(STUDY, make_record())
     # Refused once, not retried as if it were a race.
-    assert sum(method == "PUT" for method, _ in fake.requests[before:]) == 1
+    assert sum(method == "PATCH" for method, _ in fake.requests[before:]) == 1
 
 
 def test_a_failed_upload_leaves_the_index_alone(
     session: GitHubSession, fake: FakeGitHub, make_record
 ) -> None:
-    real_put = session._put
-
-    def fail_the_upload(git_path, data, **kwargs):
-        if git_path.endswith("trace.json"):
-            raise BackendUnavailableError("network")
-        return real_put(git_path, data, **kwargs)
-
-    session._put = fail_the_upload
+    fake.fail_next(500, method="PATCH")  # the last step: moving the branch
     with pytest.raises(BackendUnavailableError):
         session.write_file(STUDY, "trace.json", b"{}")
-    session._put = real_put
-    # The name was never written, so it must not block a record of that name.
+    # Nothing landed, so the name must not block a record of that name.
     session.write_record(STUDY, make_record("trace"))
     assert [item.record.record_id for item in session.list_records(STUDY)] == ["trace"]
 
@@ -528,60 +538,78 @@ def test_uploaded_files_are_not_kept_in_memory(session: GitHubSession) -> None:
     assert all(len(data) < 1000 for data in session._blobs.values())
 
 
-def _fail_put_to(session: GitHubSession, suffix: str, error: Exception):
-    real_put = session._put
-
-    def put(git_path, data, **kwargs):
-        if git_path.endswith(suffix):
-            raise error
-        return real_put(git_path, data, **kwargs)
-
-    session._put = put
-    return real_put
-
-
-@pytest.mark.parametrize("step", ["fiber-1.md", INDEX_FILE])
-def test_a_write_that_fails_after_the_record_says_so(
-    session: GitHubSession, fake: FakeGitHub, make_record, step: str
+@pytest.mark.parametrize("method", ["POST", "PATCH"])
+def test_a_failed_write_changes_nothing(
+    session: GitHubSession, fake: FakeGitHub, make_record, method: str
 ) -> None:
     first = session.write_record(STUDY, make_record())
-    changed = make_record(diameter_um=200.0)
-    real_put = _fail_put_to(session, step, BackendUnavailableError("network"))
-    with pytest.raises(BackendUnavailableError, match="was saved") as caught:
-        session.write_record(STUDY, changed, prior_receipt=first)
-    session._put = real_put
-    saved = caught.value.receipt
-    assert saved.checksum != first.checksum
-    assert session.read_record(STUDY, "fiber-1").receipt.checksum == saved.checksum
-
-    # Writing again with that receipt finishes the job: the preview and the
-    # index catch up, and a later read-then-write is not a false conflict.
-    session.write_record(STUDY, changed, prior_receipt=saved)
-    assert "200" in fake.files(REPO)["records/Study/fiber-1.md"].decode()
-    read = session.read_record(STUDY, "fiber-1")
-    session.write_record(STUDY, make_record(diameter_um=300.0), prior_receipt=read.receipt)
-
-
-def test_a_preview_edited_mid_write_keeps_the_receipt(session: GitHubSession, make_record) -> None:
-    first = session.write_record(STUDY, make_record())
-    _fail_put_to(session, "fiber-1.md", ConflictError("sha does not match"))
-    with pytest.raises(ConflictError, match="was saved") as caught:
+    before = fake.files(REPO)
+    fake.fail_next(502, method=method)
+    with pytest.raises(BackendUnavailableError):
         session.write_record(STUDY, make_record(diameter_um=200.0), prior_receipt=first)
-    assert caught.value.receipt.checksum != first.checksum
+    assert fake.files(REPO) == before  # record, preview and index all unchanged
+    # The old receipt still works: no half-written state to recover from.
+    session.write_record(STUDY, make_record(diameter_um=200.0), prior_receipt=first)
+
+
+def test_each_write_is_one_commit(session: GitHubSession, fake: FakeGitHub, make_record) -> None:
+    commits = fake.repo(REPO).commits
+    before = len(commits)
+    session.write_record(STUDY, make_record())
+    assert len(commits) == before + 1
+    assert commits[-1].paths == {
+        "records/Study/fiber-1.json",
+        "records/Study/fiber-1.md",
+        f"records/Study/{INDEX_FILE}",
+    }
+    session.write_file(STUDY, "trace.csv", b"t,s\n")
+    assert len(commits) == before + 2
+    assert commits[-1].paths == {"records/Study/trace.csv", f"records/Study/{INDEX_FILE}"}
+
+
+def test_binary_files_round_trip(session: GitHubSession, fake: FakeGitHub) -> None:
+    data = bytes(range(256))
+    receipt = session.write_file(STUDY, "frame.bin", data)
+    assert fake.files(REPO)["records/Study/frame.bin"] == data
+    assert receipt.native_id == git_blob_sha(data)
+
+
+def test_a_preview_edited_mid_write_is_a_conflict(
+    session: GitHubSession, fake: FakeGitHub, make_record
+) -> None:
+    first = session.write_record(STUDY, make_record())
+    _before_each_commit(
+        session, _once(lambda _: fake.put_file(REPO, "records/Study/fiber-1.md", "mine\n"))
+    )
+    with pytest.raises(ConflictError, match="changed at GitHub"):
+        session.write_record(STUDY, make_record(diameter_um=200.0), prior_receipt=first)
+    # Nothing of the write landed, and the edit is kept.
+    assert fake.files(REPO)["records/Study/fiber-1.md"] == b"mine\n"
+    assert session.read_record(STUDY, "fiber-1").receipt.checksum == first.checksum
+
+
+def test_reads_come_from_one_commit(session: GitHubSession, fake: FakeGitHub, make_record) -> None:
+    session.write_record(STUDY, make_record("fiber-1"))
+    session.write_record(STUDY, make_record("fiber-2"))
+    before = len(fake.requests)
+    session.list_records(STUDY)
+    assert sum("/git/ref/" in path for _, path in fake.requests[before:]) == 1
 
 
 # Found in review, checked against real GitHub
 
 
-RACE = "refs/heads/main is at 1c2d3e but expected 4f5a6b"  # GitHub's wording, seen live
+RACE = "Update is not a fast forward"  # GitHub's answer when the branch moved
 
 
+# Both seen live: the second when several writers move the branch at once.
+@pytest.mark.parametrize("message", [RACE, "Reference cannot be updated"])
 def test_a_commit_racing_on_the_branch_is_retried(
-    session: GitHubSession, fake: FakeGitHub, make_record, monkeypatch
+    session: GitHubSession, fake: FakeGitHub, make_record, monkeypatch, message: str
 ) -> None:
     monkeypatch.setattr(github_backend, "_BRANCH_BACKOFF", 0)
     for _ in range(3):
-        fake.fail_next(409, RACE, method="PUT")
+        fake.fail_next(422, message, method="PATCH")
     session.write_record(STUDY, make_record())
     assert [item.record.record_id for item in session.list_records(STUDY)] == ["fiber-1"]
     assert "records/Study/fiber-1.md" in fake.files(REPO)
@@ -592,22 +620,18 @@ def test_a_branch_that_keeps_moving_is_backend_unavailable(
 ) -> None:
     monkeypatch.setattr(github_backend, "_BRANCH_BACKOFF", 0)
     for _ in range(github_backend._BRANCH_RETRIES):
-        fake.fail_next(409, RACE, method="PUT")
+        fake.fail_next(422, RACE, method="PATCH")
     with pytest.raises(BackendUnavailableError, match="Other commits kept landing") as raised:
         session.write_record(STUDY, make_record())
     assert type(raised.value) is BackendUnavailableError  # the public class
     assert "records/Study/fiber-1.json" not in fake.files(REPO)
 
 
-def test_folders_over_the_listing_cap_are_read_whole(
-    session: GitHubSession, fake: FakeGitHub, make_record
-) -> None:
-    receipt = session.write_record(STUDY, make_record("zz-last"))  # sorts after the cap
-    for number in range(1100):
+def test_big_folders_are_read_whole(session: GitHubSession, fake: FakeGitHub, make_record) -> None:
+    receipt = session.write_record(STUDY, make_record("zz-last"))  # sorts last
+    for number in range(1100):  # more than the Contents API would list
         fake.put_file(REPO, f"records/Study/a{number:04}.txt", "x")
     assert [item.record.record_id for item in session.list_records(STUDY)] == ["zz-last"]
-    assert any("/git/trees/" in path for _, path in fake.requests)
-    # An update past the cap is an update, not "already exists".
     session.write_record(STUDY, make_record("zz-last", 250.0), prior_receipt=receipt)
     assert session.read_record(STUDY, "zz-last").record.payload["diameter_um"] == 250.0
 
@@ -645,22 +669,59 @@ def test_a_file_committed_in_nfd_is_refused_not_duplicated(
     assert f"records/Study/{NFC}.txt" not in fake.files(REPO)
 
 
-def test_an_upload_that_lost_a_race_keeps_its_name_listed(
+def test_an_upload_racing_on_the_same_name_is_a_conflict(
     session: GitHubSession, fake: FakeGitHub
 ) -> None:
-    real_put = session._put
+    git_path = "records/Study/calib.json"
+    _before_each_commit(session, _once(lambda _: fake.put_file(REPO, git_path, b"{}")))
+    with pytest.raises(ConflictError, match="already exists"):
+        session.write_file(STUDY, "calib.json", b'{"x": 1}')
+    assert fake.files(REPO)[git_path] == b"{}"  # theirs, untouched
 
-    def someone_else_won(git_path, data, **kwargs):
-        if git_path.endswith("calib.json"):
-            fake.put_file(REPO, git_path, b"{}")  # their upload of the same name
-            raise ConflictError("already exists")
-        return real_put(git_path, data, **kwargs)
 
-    session._put = someone_else_won
-    with pytest.raises(ConflictError):
-        session.write_file(STUDY, "calib.json", b"{}")
-    session._put = real_put
-    # Still listed as a file, so their upload isn't read as a record.
+# Found in Johnny's review
+
+
+def test_write_file_updates_a_json_file_committed_by_hand(
+    session: GitHubSession, fake: FakeGitHub, make_record
+) -> None:
+    fake.put_file(REPO, "records/Study/config.json", '{"rate": 1}')
+    session.write_file(STUDY, "config.json", b'{"rate": 2}')
+    assert fake.files(REPO)["records/Study/config.json"] == b'{"rate": 2}'
     assert session.list_records(STUDY) == []
-    index = json.loads(fake.files(REPO)[f"records/Study/{INDEX_FILE}"])
-    assert "calib.json" in index["files"]
+
+
+def test_write_file_still_refuses_a_hand_committed_record(
+    session: GitHubSession, fake: FakeGitHub, make_record
+) -> None:
+    fake.put_file(REPO, "records/Study/fiber-1.json", make_record().model_dump_json())
+    with pytest.raises(ValidationError, match="record's file name"):
+        session.write_file(STUDY, "fiber-1.json", b"{}")
+    with pytest.raises(ValidationError, match="record's file name"):
+        session.write_file(STUDY, "fiber-1.md", b"notes")
+
+
+@pytest.mark.parametrize("prefix", ["CON", "a%3Ab", "records/trailing.", "aux.txt"])
+def test_prefixes_that_break_a_checkout_are_refused(api_url: str, prefix: str) -> None:
+    with pytest.raises(ConfigurationError, match="prefix"):
+        open_session(api_url, f"github://my-lab/metadata@main/{prefix}")
+
+
+def test_a_lagging_branch_read_does_not_hide_our_own_commit(
+    session: GitHubSession, fake: FakeGitHub, make_record
+) -> None:
+    # Seen live: right after a commit, GitHub can still report the branch at
+    # the commit before it.
+    before = fake.repo(REPO).branches["main"]
+    session.ensure_container(LogicalPath(("Study", "Cohort A")))
+    real_request = session._request
+
+    def stale_ref(method, url, action, **kwargs):
+        if method == "GET" and "/git/ref/" in url:
+            return {"object": {"sha": before}}
+        return real_request(method, url, action, **kwargs)
+
+    session._request = stale_ref
+    session.write_record(LogicalPath(("Study", "Cohort A")), make_record())
+    session._request = real_request
+    assert "records/Study/Cohort A/fiber-1.json" in fake.files(REPO)
