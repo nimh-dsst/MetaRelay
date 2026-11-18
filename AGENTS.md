@@ -49,9 +49,12 @@ install and once with all extras. `uv run ruff format .` and
   Backends never build preview markup.
 - **Raise only `metarelay` errors.** Translate native errors (`labapi`,
   `requests`, `OSError`) into the classes in `core/errors.py`.
-- **Never put a secret in a message.** No token, signed URL, or input value
-  in an error or log. `labapi` signs requests in the query string, so never
-  print or chain a `requests` error. Use `raise ... from None`.
+- **Never put a secret in a message.** No token, password, signed URL, or
+  other credential in an error or log. Record metadata is not a secret:
+  conflict messages quote record values on purpose. Validation errors still
+  leave input values out, since a config field can hold a token. `labapi`
+  signs requests in the query string, so never print or chain a `requests`
+  error. Use `raise ... from None`.
 - **Never store credentials.** Callers pass config objects. MetaRelay never
   saves them, and destination URIs can't hold a username or password.
 - **Never call a real ELN from the test suite.** Use `MemorySession`, the
