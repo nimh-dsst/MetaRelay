@@ -725,3 +725,61 @@ def test_a_lagging_branch_read_does_not_hide_our_own_commit(
     session.write_record(LogicalPath(("Study", "Cohort A")), make_record())
     session._request = real_request
     assert "records/Study/Cohort A/fiber-1.json" in fake.files(REPO)
+
+
+def test_a_branch_reset_to_undo_our_write_is_respected(
+    session: GitHubSession, fake: FakeGitHub, make_record, monkeypatch
+) -> None:
+    before = fake.repo(REPO).branches["main"]
+    session.write_record(STUDY, make_record())
+    monkeypatch.setattr(github_backend, "_REPLICA_LAG", 0)  # the lag window has passed
+    fake.repo(REPO).branches["main"] = before  # someone resets the branch
+    assert session.list_records(STUDY) == []
+    session.write_record(STUDY, make_record("fiber-2"))
+    assert "records/Study/fiber-1.json" not in fake.files(REPO)  # not brought back
+
+
+def test_a_prefix_differing_only_in_case_is_refused(api_url: str, fake: FakeGitHub) -> None:
+    fake.put_file(REPO, "records/Study/.metarelay.json", "{}")
+    uri = "github://my-lab/metadata@main/Records"
+    with (
+        closing(open_session(api_url, uri)) as session,
+        pytest.raises(ValidationError, match="differs only in case"),
+    ):
+        session.ensure_container(STUDY)
+    assert not any(path.startswith("Records/") for path in fake.files(REPO))
+
+
+def test_a_prefix_committed_in_nfd_is_refused(api_url: str, fake: FakeGitHub) -> None:
+    fake.put_file(REPO, f"{NFD}/notes.txt", "x")
+    uri = f"github://my-lab/metadata@main/{NFC}"
+    with (
+        closing(open_session(api_url, uri)) as session,
+        pytest.raises(ValidationError, match="Unicode form"),
+    ):
+        session.list_containers()
+
+
+def test_a_dot_prefix_is_allowed(api_url: str, fake: FakeGitHub) -> None:
+    with closing(open_session(api_url, "github://my-lab/metadata@main/.metadata")) as session:
+        session.ensure_container(STUDY)
+    assert f".metadata/Study/{INDEX_FILE}" in fake.files(REPO)
+
+
+def test_write_file_and_list_records_agree_on_a_misnamed_record(
+    session: GitHubSession, fake: FakeGitHub, make_record
+) -> None:
+    fake.put_file(REPO, "records/Study/foo.json", make_record("bar").model_dump_json())
+    assert session.list_records(STUDY) == []
+    session.write_file(STUDY, "foo.json", b"{}")  # not a record, so a file
+
+
+def test_an_identical_write_racing_ours_is_not_a_conflict(
+    session: GitHubSession, api_url: str, make_record
+) -> None:
+    record = make_record()
+    # A rerun of the same pipeline commits the same record first.
+    with closing(open_session(api_url)) as other:
+        _before_each_commit(session, _once(lambda _: other.write_record(STUDY, record)))
+        session.write_record(STUDY, record)
+    assert session.read_record(STUDY, "fiber-1").record == record

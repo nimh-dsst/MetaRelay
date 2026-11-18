@@ -32,7 +32,8 @@ class WriteMode(StrEnum):
 
     Best effort: LabArchives and eLabFTW can only check and then write, so two
     writers at the same moment can both succeed. Local (exclusive file
-    create) and GitHub (PUT without a sha) can enforce it.
+    create) and GitHub (a commit that lands only as a fast forward) can
+    enforce it.
     """
     UPSERT = "upsert"
     """The default. Create or update, raising ``ConflictError`` if the remote

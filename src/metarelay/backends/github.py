@@ -103,6 +103,9 @@ HARD_MAX_FILE_BYTES = 50 * 1024 * 1024
 _BRANCH_RETRIES = 6
 _BRANCH_BACKOFF = 0.25
 """Seconds before the first retry when other commits moved the branch; doubles each time."""
+_REPLICA_LAG = 10.0
+"""Seconds after its own commit that a session distrusts a branch read
+reporting an older commit (GitHub replica lag). Later, it is a real reset."""
 _CACHE_LIMIT = 1024
 """Git objects kept per session, per kind. They never change, so any is safe to keep."""
 
@@ -201,7 +204,8 @@ def _parse(destination: Destination) -> _Address:
     parts = tuple(_nfc(part) for part in prefix.parts)
     for part in parts:
         try:
-            check_local_name(part, "Prefix folder")
+            # A leading '.' is reserved inside containers, not in your prefix.
+            check_local_name(f"_{part}" if part.startswith(".") else part, "Prefix folder")
         except ValidationError as error:
             raise ConfigurationError(
                 f"The prefix in {destination.uri} is not valid: {error}"
@@ -342,18 +346,24 @@ def _remember(cache: dict[str, Any], key: str, value: Any) -> None:
     cache[key] = value
 
 
-def _pin(pinned: dict[str, str | None], seen: Mapping[str, str | None], action: str) -> None:
+def _pin(
+    pinned: dict[str, str | None],
+    seen: Mapping[str, str | None],
+    action: str,
+    ours: Mapping[str, str],
+) -> None:
     """Refuse a retry if a file the write touches changed since the first attempt.
 
     The first attempt records each file's blob ``sha`` (``None`` if absent).
     A retry after the branch moved may commit on top of other people's
-    changes, but not on top of a change to these files.
+    changes, but not on top of a change to these files, unless the change
+    is the very bytes this write would commit (``ours``: name -> sha).
     """
     if not pinned:
         pinned.update(seen)
         return
     for name, sha in seen.items():
-        if sha == pinned[name]:
+        if sha == pinned[name] or (sha is not None and sha == ours.get(name)):
             continue
         if pinned[name] is None:
             raise ConflictError(
@@ -414,6 +424,7 @@ class GitHubSession:
         self._commit_trees: dict[str, str] = {}
         self._latest: str | None = None
         """The last commit this session landed."""
+        self._landed_at = 0.0
         self._replaced: dict[str, None] = {}
         """Commits this session's own commits replaced on the branch (an ordered set)."""
         self._closed = False
@@ -519,6 +530,7 @@ class GitHubSession:
                     md_name: md_entry.sha if md_entry else None,
                 },
                 where,
+                ours={json_name: _git_sha(data), md_name: _git_sha(preview)},
             )
 
             remote_bytes = self._blob(json_entry.sha, where) if json_entry else None
@@ -652,7 +664,7 @@ class GitHubSession:
                 raise ValidationError(
                     f"{name!r} is a record's file name. Use another name for this file."
                 )
-            _pin(pinned, {name: entry.sha if entry else None}, where)
+            _pin(pinned, {name: entry.sha if entry else None}, where, ours={name: sha})
 
             # The file and its line in the index land in one commit, so an
             # upload is never mistaken for a record.
@@ -723,11 +735,15 @@ class GitHubSession:
             commit = ref["object"]["sha"]
             if not isinstance(commit, str):
                 raise TypeError
-        if commit in self._replaced and self._latest is not None:
-            # GitHub can answer from a replica that hasn't seen our last
-            # commit yet. Never read from before our own writes. If the
-            # branch has really moved past ours, the next commit isn't a
-            # fast forward and is retried from a fresh read.
+        if (
+            commit in self._replaced
+            and self._latest is not None
+            and time.monotonic() - self._landed_at < _REPLICA_LAG
+        ):
+            # Right after a commit, GitHub can answer from a replica that
+            # hasn't seen it yet. Don't read from before our own write. Only
+            # briefly: later, an older commit means someone reset the branch
+            # (to undo our write, say), and building on ours would bring it back.
             commit = self._latest
         tree = self._commit_trees.get(commit)
         if tree is None:
@@ -765,9 +781,20 @@ class GitHubSession:
         """The folder at ``path`` in ``snapshot``, or ``None`` if it doesn't exist."""
         entries = self._tree(snapshot.tree, "the repository root")
         walked: list[str] = []
-        for part in (*self._address.prefix, *path.parts):
+        prefix_depth = len(self._address.prefix)
+        for depth, part in enumerate((*self._address.prefix, *path.parts)):
             walked.append(part)
             entry = entries.get(part)
+            if depth < prefix_depth:
+                # The prefix gets the same name checks as containers, or a
+                # look-alike prefix would be created beside the real one.
+                self._refuse_other_form(entry, part)
+                twin = _twin(entries, part)
+                if entry is None and twin is not None:
+                    raise ValidationError(
+                        f"The prefix folder {part!r} differs only in case from {twin!r}, "
+                        "which already exists. Use the existing spelling in the URI."
+                    )
             if entry is None or entry.stored != part:
                 return None  # missing, or committed in another Unicode form
             if entry.kind != "dir":
@@ -828,7 +855,7 @@ class GitHubSession:
     ) -> str:
         """Commit ``changes`` (``git path -> bytes``) on top of ``snapshot``.
 
-        Moves the branch only if it still points at ``snapshot``; raises
+        Moves the branch only as a fast forward from ``snapshot``; raises
         ``_BranchMoved`` otherwise, and nothing lands. Returns the commit ID.
         """
         items = []
@@ -877,6 +904,7 @@ class GitHubSession:
         if self._latest is not None:
             _remember(self._replaced, self._latest, None)
         self._latest = commit_sha
+        self._landed_at = time.monotonic()
         return commit_sha
 
     def _with_retries(self, action: str, attempt: Callable[[], _T]) -> _T:
@@ -945,8 +973,9 @@ class GitHubSession:
     ) -> bool:
         """Whether ``name`` is the ``.json`` or ``.md`` of a record here.
 
-        A ``.json`` MetaRelay didn't index counts only if it holds a record,
-        as in ``list_records``: a hand-committed ``config.json`` is a file.
+        A ``.json`` MetaRelay didn't index counts only if ``list_records``
+        would list it (it holds a record with that ID): a hand-committed
+        ``config.json`` is a file.
         """
         for record_id in self._record_ids(entries, index):
             if _fold(name) not in {_fold(f"{record_id}.json"), _fold(f"{record_id}.md")}:
@@ -956,7 +985,8 @@ class GitHubSession:
             entry = entries.get(f"{record_id}.json")
             if entry is not None and entry.kind == "file":
                 data = self._blob(entry.sha, f"read {record_id!r} in {self._describe(path)}")
-                if _parse_record(data) is not None:
+                record = _parse_record(data)
+                if record is not None and record.record_id == record_id:
                     return True
         return False
 

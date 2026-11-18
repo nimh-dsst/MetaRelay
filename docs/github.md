@@ -91,9 +91,11 @@ while and counts against GitHub's rate limit (5,000 requests an hour). Use
 `read_record` when you know the ID.
 
 Each write is one commit: a record, its preview, and the index change land
-together, and a file from `write_file` lands with its line in the index. A
-write that fails leaves the repository as it was. Writing a record that
-hasn't changed makes no commit.
+together, and a file from `write_file` lands with its line in the index.
+There is no half-written state: a write lands whole or not at all. Rarely,
+the connection drops after GitHub took the commit, so the write raises
+`BackendUnavailableError` but did land; writing again is safe and makes no
+second commit. Writing a record that hasn't changed makes no commit.
 
 Names that would break a checkout on macOS or Windows (`\ : * ? " < > |`, a
 trailing dot, `CON`) and names that differ only in case from one already
