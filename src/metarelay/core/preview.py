@@ -338,8 +338,8 @@ def stored_preview_diff(
     differences mix a person's edits with old values, so none are listed.
     """
     diff = preview_diff(stored, current, format=format)
-    if diff is None or not diff.complete:
-        return diff
+    if diff is None:
+        return None
     record = Record.model_validate_json(stored or b"")  # preview_diff parsed it
     preview = render_preview(record)
     rendered = preview.markdown if format == "markdown" else preview.html
