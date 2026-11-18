@@ -421,7 +421,7 @@ def _stored_preview_diff(
     values would then read as a person's edits, and accepting them would
     undo that change. So the diff is complete only when the preview
     MetaRelay last wrote (the index's checksum) is the stored record's own
-    render.
+    render. Otherwise it lists no edits: MetaRelay can't separate them.
     """
     text = preview.decode(errors="replace") if preview is not None else None
     diff = preview_diff(stored, text, format="markdown")
@@ -432,7 +432,9 @@ def _stored_preview_diff(
     except ValueError:
         rendered = None
     if rendered is None or preview_checksum(rendered) != written_preview:
-        return PreviewDiff(edits=diff.edits, complete=False)
+        # The preview lags the record, so its differences mix a person's
+        # edits with values from before the .json changed. List none of them.
+        return PreviewDiff(edits=[], complete=False)
     return diff
 
 

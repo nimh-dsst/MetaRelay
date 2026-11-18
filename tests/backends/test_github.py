@@ -637,6 +637,8 @@ def test_an_edit_to_a_stale_preview_cannot_be_accepted(session, fake, make_recor
         session.write_record(STUDY, make_record(diameter_um=300), prior_receipt=read.receipt)
     diff = raised.value.preview_diff
     assert diff is not None and not diff.complete
+    assert diff.edits == []
+    assert "diameter_um" not in str(raised.value)
     with pytest.raises(ConflictError, match="can't list"):
         accept_edits(session, STUDY, make_record(diameter_um=300), diff)
     assert session.read_record(STUDY, "fiber-1").record.payload == {"diameter_um": 300.0}
