@@ -76,7 +76,7 @@ alone.
 ## Edits made in eLabFTW
 
 The JSON in `metadata.metarelay` is the source of truth. MetaRelay never
-reads values back from the tables or fields.
+takes a value from the tables or fields unless you accept the edit.
 
 At each write, MetaRelay saves a checksum of the entry's body and fields as
 eLabFTW saved them. If someone edits either one in eLabFTW, the next write
@@ -85,6 +85,17 @@ That's true for every record in the entry, and even if your code read the
 record after the edit. Keep the edit by copying it into the record, or
 replace it with `mode="force"`. Forcing rebuilds the whole entry from the
 stored records, so it also replaces hand edits to the other records' tables.
+
+The error's `preview_diff` says what changed ([Concepts](concepts.md#when-someone-edited-the-preview)):
+each value that differs from what MetaRelay wrote, in the body's tables or
+in the eLabFTW fields, with its record ID, so an edit to another record in
+the same entry is listed too. The body is read by its text, since eLabFTW's
+editor reformats the HTML. The same change made in both places is listed
+once. It is complete only if nothing else changed: no text added outside
+the tables, no table or heading renamed, no field added or retyped, and the
+body and the fields don't disagree about a value.
+To keep the edits, `accept_edits` copies them into the record and writes it,
+or run `metarelay write --accept-edits` ([Concepts](concepts.md#when-someone-edited-the-preview)).
 
 ## Limits
 

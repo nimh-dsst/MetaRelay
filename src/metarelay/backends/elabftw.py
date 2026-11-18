@@ -69,6 +69,7 @@ Limits
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import unicodedata
 from collections.abc import Mapping
@@ -91,7 +92,17 @@ from metarelay.core.errors import (
     ValidationError,
 )
 from metarelay.core.path import ROOT, Container, LogicalPath
-from metarelay.core.preview import Table, render_preview
+from metarelay.core.preview import (
+    Heading,
+    PreviewDiff,
+    PreviewEdit,
+    Table,
+    best_effort,
+    diff_blocks,
+    parse_html,
+    render_preview,
+    to_html,
+)
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
 from metarelay.core.session import StoredRecord
@@ -259,8 +270,14 @@ def _records(ours: Mapping[str, Any], where: str) -> dict[str, Record]:
     return records
 
 
-def _render(path: LogicalPath, kind: str, records: Mapping[str, Record]) -> tuple[str, dict, dict]:
-    """The body, ``extra_fields``, and field groups for an entry."""
+_Origin = tuple[str, str | None, str]
+"""Where a field's value comes from: record ID, table title, row name."""
+
+
+def _render(
+    path: LogicalPath, kind: str, records: Mapping[str, Record]
+) -> tuple[str, dict, dict, dict[str, _Origin]]:
+    """The body, ``extra_fields``, field groups, and each record field's origin."""
     if records:
         body = "\n<hr>\n".join(render_preview(records[key]).html for key in sorted(records))
     elif kind == FOLDER:
@@ -270,12 +287,17 @@ def _render(path: LogicalPath, kind: str, records: Mapping[str, Record]) -> tupl
 
     groups = [{"id": 1, "name": "MetaRelay"}]
     fields: dict[str, dict[str, Any]] = {}
+    origins: dict[str, _Origin] = {}
 
-    def add(label: str, value: str, group_id: int, **extra: Any) -> None:
+    def add(
+        label: str, value: str, group_id: int, origin: _Origin | None = None, **extra: Any
+    ) -> None:
         unique, count = label, 1
         while unique in fields:
             count += 1
             unique = f"{label} ({count})"
+        if origin is not None:
+            origins[unique] = origin
         fields[unique] = {
             "type": "text",
             "value": value,
@@ -295,8 +317,122 @@ def _render(path: LogicalPath, kind: str, records: Mapping[str, Record]) -> tupl
             for key, value in table.rows:
                 # Prefix the table title only when two tables share a row name.
                 label = key if keys.count(key) == 1 else f"{table.title} · {key}"
-                add(f"{record_id} · {label}", value, group_id)
-    return body, fields, {"extra_fields_groups": groups, "display_main_text": True}
+                add(f"{record_id} · {label}", value, group_id, (record_id, table.title, key))
+    return body, fields, {"extra_fields_groups": groups, "display_main_text": True}, origins
+
+
+def _entry_diff(
+    entry: Mapping[str, Any],
+    ours: Mapping[str, Any],
+    path: LogicalPath,
+    records: Mapping[str, Record],
+) -> PreviewDiff:
+    """What someone changed in the entry since MetaRelay wrote it.
+
+    Both places a value shows are read: the fields, exactly, and the body's
+    tables, by their text (the editor reformats the HTML, as LabArchives
+    does). Both are compared with what the stored records render to, by
+    ``diff_blocks``, the rule every backend uses. The same change made in
+    both places is listed once.
+
+    The edits are complete when nothing else changed: putting the listed
+    field values back gives exactly the fields MetaRelay wrote (no field
+    added, renamed, or retyped, and the path fields intact), the body still
+    has the same headings and tables with nothing added between them, and the
+    body and the field weren't both changed, to different values. (A value
+    changed in only one of the two places is an edit.)
+    """
+    _, written, _, origins = _render(path, ours["kind"], records)
+    fields = _fields_diff(entry, written, origins)
+    body = _body_diff(entry.get("body"), records)
+    seen: dict[tuple[str, str | None, str, str | None], PreviewEdit] = {}
+    edits: list[PreviewEdit] = []
+    disagree = False
+    for edit in [*fields.edits, *body.edits]:
+        key = (edit.record_id, edit.table, edit.field, edit.written)
+        if key in seen:
+            if seen[key].current == edit.current:
+                continue  # the same change in the body and the field
+            disagree = True  # the body says one thing, the field another
+        seen.setdefault(key, edit)
+        edits.append(edit)
+    return PreviewDiff(edits=edits, complete=fields.complete and body.complete and not disagree)
+
+
+def _fields_diff(
+    entry: Mapping[str, Any], written: Mapping[str, Any], origins: Mapping[str, _Origin]
+) -> PreviewDiff:
+    """The edits to the record fields. Complete when nothing else in the fields changed."""
+    current = entry["metadata"].get("extra_fields") or {}
+    if not isinstance(current, dict):
+        return PreviewDiff(edits=[], complete=False)
+    reverted = copy.deepcopy(current)
+    tables: dict[str, tuple[list[Table], list[Table]]] = {}
+    for label, (record_id, title, row) in origins.items():
+        value = written[label]["value"]
+        now = current.get(label)
+        if not isinstance(now, dict):
+            reverted[label] = copy.deepcopy(written[label])
+        elif now.get("value") != value:
+            reverted[label]["value"] = value
+        old, new = tables.setdefault(record_id, ([], []))
+        if not old or old[-1].title != title:
+            old.append(Table(title=title, rows=[]))
+            new.append(Table(title=title, rows=[]))
+        old[-1].rows.append((row, value))
+        if isinstance(now, dict):
+            new[-1].rows.append((row, "" if now.get("value") is None else str(now["value"])))
+    # eLabFTW stores the fields as written, so anything left over is another
+    # change. Not ``position``: it's display order, and re-rendering from the
+    # stored records (whose keys MySQL reorders) can number fields differently.
+    clean = _unordered(reverted) == _unordered(written)
+    diffs = [
+        diff_blocks(rid, _as_shown(old), _as_shown(new), clean=clean)
+        for rid, (old, new) in tables.items()
+    ]
+    edits = [edit for diff in diffs for edit in diff.edits]
+    return PreviewDiff(edits=edits, complete=clean and all(diff.complete for diff in diffs))
+
+
+def _as_shown(tables: list[Table]) -> list[Heading | Table]:
+    """Field values read the way the body's are, so the two compare equal.
+
+    The body is read through ``parse_html``, which collapses whitespace; the
+    same round trip here keeps one rule for both (as ``preview_diff`` does).
+    """
+    return parse_html(to_html(tables))[0]
+
+
+def _unordered(fields: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        label: {k: v for k, v in field.items() if k != "position"}
+        if isinstance(field, dict)
+        else field
+        for label, field in fields.items()
+    }
+
+
+def _body_diff(body: Any, records: Mapping[str, Record]) -> PreviewDiff:
+    """The edits to the body's tables, read by their text, record by record."""
+    if not isinstance(body, str):
+        return PreviewDiff(edits=[], complete=False)
+    found, clean = parse_html(body)
+    # The body is each record's preview in turn. Split it by how many blocks
+    # each preview has, not by headings: a schema's own renderer may use any
+    # number. Blocks added or removed leave the counts off: not complete.
+    diffs: list[PreviewDiff] = []
+    start = 0
+    for key in sorted(records):
+        expected = parse_html(render_preview(records[key]).html)[0]
+        section = found[start : start + len(expected)]
+        start += len(expected)
+        diffs.append(diff_blocks(key, expected, section, clean=clean))
+    if start != len(found):
+        return PreviewDiff(edits=[], complete=False)
+    return PreviewDiff(
+        edits=[edit for diff in diffs for edit in diff.edits],
+        complete=clean and all(diff.complete for diff in diffs),
+    )
 
 
 def _metadata(
@@ -306,7 +442,7 @@ def _metadata(
     records: Mapping[str, Record],
 ) -> tuple[str, dict[str, Any]]:
     """The entry's new body and metadata, keeping keys MetaRelay doesn't own."""
-    body, fields, elabftw = _render(path, kind, records)
+    body, fields, elabftw, _ = _render(path, kind, records)
     metadata = {k: v for k, v in previous.items() if k not in {"metarelay", "extra_fields"}}
     metadata["elabftw"] = {**previous.get("elabftw", {}), **elabftw}
     metadata["extra_fields"] = fields
@@ -396,11 +532,15 @@ class ElabFTWSession:
         forced = WriteMode(mode) is WriteMode.FORCE
         # Like decide_write: identical content with no receipt is not a conflict.
         if edited and not forced and (action is WriteAction.WRITE or prior_receipt is not None):
+            diff = best_effort(lambda: _entry_diff(entry, ours, path, records))
+            changed = diff.describe(writing=record.record_id) + " " if diff else ""
             raise ConflictError(
                 f"The eLabFTW entry for {self._describe(path)} was edited directly since "
-                "MetaRelay last wrote it. To keep the edit, copy it into the record "
-                "first. Then write again with mode='force', which rebuilds the whole "
-                "entry, including the other records' tables."
+                f"MetaRelay last wrote it. {changed}"
+                "To keep the edit, copy it into the record first. Then write again with "
+                "mode='force', which rebuilds the whole entry, including the other "
+                "records' tables.",
+                preview_diff=diff,
             )
         if action is WriteAction.WRITE:
             records[record.record_id] = record

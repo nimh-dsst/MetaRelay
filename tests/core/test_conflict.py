@@ -12,6 +12,7 @@ from metarelay import (
     WriteMode,
 )
 from metarelay.core.conflict import decide_write
+from metarelay.core.preview import PreviewDiff
 
 LOCAL = "local"
 PRIOR = "prior"
@@ -150,3 +151,94 @@ def test_preview_conflict_advice_works() -> None:
     assert decide(WriteMode.FORCE, remote=LOCAL, prior=prior, remote_preview="p2") is (
         WriteAction.WRITE
     )
+
+
+def test_a_preview_edit_conflict_carries_the_diff() -> None:
+    diff = PreviewDiff(edits=[], complete=False)
+    with pytest.raises(ConflictError, match="can't tell what changed") as raised:
+        decide_write(
+            mode=WriteMode.UPSERT,
+            local_checksum=LOCAL,
+            remote_checksum=PRIOR,
+            prior_receipt=receipt(preview_checksum="p1"),
+            remote_preview_checksum="p2",
+            preview_diff=lambda: diff,
+        )
+    assert raised.value.preview_diff is diff
+
+
+def test_the_diff_is_only_worked_out_for_an_edited_preview() -> None:
+    calls: list[str] = []
+    action = decide_write(
+        mode=WriteMode.UPSERT,
+        local_checksum=LOCAL,
+        remote_checksum=PRIOR,
+        prior_receipt=receipt(preview_checksum="p1"),
+        remote_preview_checksum="p1",
+        preview_diff=lambda: calls.append("called"),  # type: ignore[arg-type,func-returns-value]
+    )
+    assert action is WriteAction.WRITE
+    assert calls == []
+    with pytest.raises(ConflictError) as raised:
+        decide(remote=OTHER, prior=receipt())
+    assert raised.value.preview_diff is None
+
+
+def test_a_failing_diff_still_raises_the_conflict() -> None:
+    def broken() -> PreviewDiff:
+        raise KeyError("renderer broke")
+
+    with pytest.raises(ConflictError, match="edited directly") as raised:
+        decide_write(
+            mode=WriteMode.UPSERT,
+            local_checksum=LOCAL,
+            remote_checksum=PRIOR,
+            prior_receipt=receipt(preview_checksum="p1"),
+            remote_preview_checksum="p2",
+            preview_diff=broken,
+        )
+    assert raised.value.preview_diff is None
+
+
+# Accepting notebook edits
+
+
+def test_accept_edits_writes_the_record_with_its_edits(make_record) -> None:
+    from metarelay import LogicalPath as Path_
+    from metarelay import accept_edits
+    from metarelay.testing.memory import MemorySession
+
+    session, where = MemorySession(), Path_(("Study",))
+    session.ensure_container(where)
+    receipt = session.write_record(where, make_record(diameter_um=400))
+    session.edit_preview(
+        where, "fiber-1", session.preview_of(where, "fiber-1").replace("400.0", "250")
+    )
+    with pytest.raises(ConflictError) as raised:
+        session.write_record(where, make_record(diameter_um=400), prior_receipt=receipt)
+
+    written = accept_edits(session, where, make_record(diameter_um=400), raised.value.preview_diff)
+    assert written["fiber-1"].record.payload == {"diameter_um": 250.0}
+    # The receipt describes the destination now, so the next write goes through.
+    session.write_record(
+        where, make_record(diameter_um=250), prior_receipt=written["fiber-1"].receipt
+    )
+
+
+def test_accept_edits_writes_nothing_when_it_cant_accept_everything(make_record) -> None:
+    from metarelay import LogicalPath as Path_
+    from metarelay import accept_edits
+    from metarelay.core.preview import PreviewEdit
+    from metarelay.testing.memory import MemorySession
+
+    session, where = MemorySession(), Path_(("Study",))
+    session.ensure_container(where)
+    session.write_record(where, make_record(diameter_um=400))
+    edit = PreviewEdit(
+        record_id="fiber-1", table="Metadata", field="diameter_um", written="400.0", current="wide"
+    )
+    with pytest.raises(ValidationError, match="isn't a number"):
+        accept_edits(session, where, make_record(), PreviewDiff(edits=[edit], complete=True))
+    with pytest.raises(ConflictError, match="can't list"):
+        accept_edits(session, where, make_record(), PreviewDiff(edits=[edit], complete=False))
+    assert session.read_record(where, "fiber-1").record.payload == {"diameter_um": 400.0}

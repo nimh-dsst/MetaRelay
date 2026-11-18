@@ -15,6 +15,9 @@ class TestMemorySession(BackendConformance):
     def edit_preview(self, session, path, record_id, text) -> None:
         session.edit_preview(path, record_id, text)
 
+    def replace_in_preview(self, session, path, record_id, old, new) -> None:
+        session.edit_preview(path, record_id, session.preview_of(path, record_id).replace(old, new))
+
 
 class _OnlyUnderBase(MemorySession):
     """Refuses to create anything outside ``Lab Notebook``, like LabArchives."""
@@ -39,6 +42,9 @@ class TestConformanceStaysUnderItsBase(BackendConformance):
 
     def edit_preview(self, session, path, record_id, text) -> None:
         session.edit_preview(path, record_id, text)
+
+    def replace_in_preview(self, session, path, record_id, old, new) -> None:
+        session.edit_preview(path, record_id, session.preview_of(path, record_id).replace(old, new))
 
 
 def test_preview_is_stored_with_the_record(make_record) -> None:

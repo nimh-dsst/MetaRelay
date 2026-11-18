@@ -15,7 +15,8 @@ fixture that returns a fresh, empty session::
             session.close()
 
 If the backend can simulate a person editing the readable preview directly
-(D7), also override ``edit_preview``. Otherwise those checks are skipped.
+(D7), also override ``edit_preview`` and ``replace_in_preview``. Otherwise
+those checks are skipped.
 
 If the backend can't create top-level containers, set ``base`` to an existing
 container to run the suite inside.
@@ -43,6 +44,7 @@ from metarelay.core.conflict import WriteMode
 from metarelay.core.destination import Destination
 from metarelay.core.errors import ConflictError, NotFoundError, ValidationError
 from metarelay.core.path import ROOT, Container, LogicalPath
+from metarelay.core.preview import PreviewDiff, PreviewEdit
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
 from metarelay.core.session import Session, StoredRecord
@@ -89,6 +91,16 @@ class BackendConformance:
 
         Optional. Backends without previews, or that can't simulate an edit,
         leave this alone and the preview-edit checks are skipped.
+        """
+        raise NotImplementedError
+
+    def replace_in_preview(
+        self, session: Session, path: LogicalPath, record_id: str, old: str, new: str
+    ) -> None:
+        """Change the value ``old`` to ``new`` in a record's preview, as a person would.
+
+        Optional, like ``edit_preview``. ``old`` appears once in the preview,
+        as a table value.
         """
         raise NotImplementedError
 
@@ -379,10 +391,41 @@ class BackendConformance:
             self.edit_preview(session, container, "rec-1", "Edited by hand\n")
         except NotImplementedError:
             pytest.skip("This backend cannot simulate a preview edit.")
-        with pytest.raises(ConflictError):
+        with pytest.raises(ConflictError) as raised:
             session.write_record(container, make_record(label="v2"), prior_receipt=receipt)
+        # MetaRelay can't read a preview replaced by free text, and says so.
+        diff = raised.value.preview_diff
+        assert diff is not None
+        assert not diff.complete
         session.write_record(container, make_record(label="v2"), mode=WriteMode.FORCE)
         assert session.read_record(container, "rec-1").record.payload["label"] == "v2"
+
+    def test_preview_edit_says_what_changed(
+        self, session: Session, container: LogicalPath, make_record
+    ) -> None:
+        receipt = session.write_record(container, make_record(label="written-label"))
+        if receipt.preview_checksum is None:
+            pytest.skip("This backend does not track previews.")
+        try:
+            self.replace_in_preview(session, container, "rec-1", "written-label", "hand-label")
+        except NotImplementedError:
+            pytest.skip("This backend cannot simulate a preview edit.")
+        with pytest.raises(ConflictError, match="hand-label") as raised:
+            session.write_record(container, make_record(label="v2"), prior_receipt=receipt)
+        assert raised.value.preview_diff == PreviewDiff(
+            edits=[
+                PreviewEdit(
+                    record_id="rec-1",
+                    table="Metadata",
+                    field="label",
+                    written="written-label",
+                    current="hand-label",
+                )
+            ],
+            complete=True,
+        )
+        # Reporting the edit changes nothing: the record is still as written.
+        assert session.read_record(container, "rec-1").record.payload["label"] == "written-label"
 
     def test_preview_edit_conflicts_even_after_a_read(
         self, session: Session, container: LogicalPath, make_record

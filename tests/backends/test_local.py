@@ -31,6 +31,10 @@ class TestLocalBackend(BackendConformance):
     def edit_preview(self, session, path, record_id, text) -> None:
         session.root.joinpath(*path.parts, f"{record_id}.md").write_text(text)
 
+    def replace_in_preview(self, session, path, record_id, old, new) -> None:
+        md = session.root.joinpath(*path.parts, f"{record_id}.md")
+        md.write_text(md.read_text().replace(old, new))
+
 
 @pytest.fixture
 def session(tmp_path: Path) -> LocalSession:
@@ -534,3 +538,13 @@ def test_record_id_too_long_for_a_file_name(
         session.write_record(STUDY, make_record(record_id))
     with pytest.raises(NotFoundError):
         session.read_record(STUDY, record_id)
+
+
+def test_an_emptied_preview_lists_every_row_as_removed(session: LocalSession, make_record) -> None:
+    receipt = session.write_record(STUDY, make_record())
+    (folder(session) / "fiber-1.md").write_text("")
+    with pytest.raises(ConflictError) as raised:
+        session.write_record(STUDY, make_record(), prior_receipt=receipt, mode="upsert")
+    diff = raised.value.preview_diff
+    assert diff is not None
+    assert diff.edits and all(edit.current is None for edit in diff.edits)

@@ -11,7 +11,7 @@ from metarelay.core.backend import (
 )
 from metarelay.core.checksum import record_checksum
 from metarelay.core.config import DestinationConfig, TokenConfig
-from metarelay.core.conflict import WriteAction, WriteMode, decide_write
+from metarelay.core.conflict import WriteAction, WriteMode, accept_edits, decide_write
 from metarelay.core.errors import (
     AuthenticationError,
     BackendUnavailableError,
@@ -26,7 +26,10 @@ from metarelay.core.path import ROOT, Container, LogicalPath
 from metarelay.core.preview import (
     Heading,
     Preview,
+    PreviewDiff,
+    PreviewEdit,
     Table,
+    apply_edits,
     register_renderer,
     render_preview,
 )
@@ -54,6 +57,8 @@ __all__ = [
     "NotFoundError",
     "PermissionDeniedError",
     "Preview",
+    "PreviewDiff",
+    "PreviewEdit",
     "Receipt",
     "Record",
     "SchemaRegistry",
@@ -66,6 +71,8 @@ __all__ = [
     "ValidationError",
     "WriteAction",
     "WriteMode",
+    "accept_edits",
+    "apply_edits",
     "auth_flow",
     "begin_login",
     "complete_login",

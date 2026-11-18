@@ -187,6 +187,13 @@ metarelay --import lab_schemas read "$DEST" "Fiber study/Cohort A" implant-M1
 `write` takes `--mode create|upsert|force`. It exits with status 3 on a
 conflict and 1 on any other error.
 
+If someone edited the record's table in the notebook, `write` stops and lists
+the edits. `write --accept-edits` copies them into the record and writes it,
+so the JSON keeps them (see
+[Concepts](concepts.md#when-someone-edited-the-preview)). It also writes the
+edited record back to your JSON file (or prints it, for `-`), since writing
+the old file again would undo the edits.
+
 `write` won't create a missing container, so a typo in the path is an error
 instead of a new folder. Run `mkdir` first, or pass `--create-path`.
 

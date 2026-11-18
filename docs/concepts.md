@@ -87,6 +87,56 @@ def write(
     return receipt
 ```
 
+### When someone edited the preview
+
+The `ConflictError` for an edit to the preview says what changed. Its
+`preview_diff` lists each table row whose value differs from what MetaRelay
+wrote, and whether that list is complete. To keep the edits, `accept_edits`
+copies them into the record and writes it, so the JSON and the preview agree
+again:
+
+```python
+from metarelay import ConflictError, accept_edits
+
+try:
+    session.write_record(path, record, prior_receipt=receipt)
+except ConflictError as error:
+    diff = error.preview_diff
+    if diff is None or not diff.complete:
+        raise  # another kind of conflict, or changes MetaRelay can't list
+    for edit in diff.edits:
+        print(edit.describe())  # Metadata · fiber.core_um: '400' → '200'
+    if person_accepts():
+        written = accept_edits(session, path, record, diff)
+        record = written[record.record_id].record  # now holds the edits
+```
+
+The JSON stays the source of truth: MetaRelay never takes a value from the
+preview by itself, only when your code calls `accept_edits`. Keep the
+returned record: writing your old copy again would undo the edits.
+
+Each value goes back where the generic preview showed it (`Context` rows
+into `context`, `Metadata` rows such as `fiber.core_um` into `payload`),
+converted to the type it replaces, and the result is validated. If any edit
+can't be applied, nothing is written and `ValidationError` says why: an edit
+to a value your record also changed, an added or removed row, a value that
+isn't a number where one was, or a schema with its own renderer.
+`apply_edits(record, edits)` does the copying without writing.
+
+On eLabFTW one entry holds several records, and the diff lists edits to all
+of them. `accept_edits` reads the other records, applies their edits, and
+writes them too, because a forced write rebuilds the whole entry. Like any
+forced write, it overwrites a change someone makes at the same moment.
+
+`complete` is `False` when someone also changed something MetaRelay can't
+list, such as text added between the tables: look at the entry and copy what
+you want by hand. The written values come from rendering the stored record
+again, so if a MetaRelay upgrade or a schema's renderer changed how a value
+reads since the last write, that row shows up as an edit too.
+
+The `metarelay` command does the same: `metarelay write` lists the edits,
+and `metarelay write --accept-edits` accepts them and updates your JSON file.
+
 ## Errors
 
 Every backend raises the same errors, all subclasses of `MetaRelayError`:

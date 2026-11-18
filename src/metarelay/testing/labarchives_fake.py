@@ -266,6 +266,11 @@ class FakeLabArchives:
 
     # Test hooks: changes made "in the LabArchives web app"
 
+    def entry_data(self, eid: str) -> str:
+        """An entry's text (or an attachment's caption), as a person sees it."""
+        with self._lock:
+            return self._entry(eid).data
+
     def edit_entry(self, eid: str, data: str) -> None:
         """Change an entry's text (or an attachment's caption), as a person would."""
         with self._lock:

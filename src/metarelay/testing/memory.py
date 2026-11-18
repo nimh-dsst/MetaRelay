@@ -27,7 +27,7 @@ from metarelay.core.conflict import WriteAction, WriteMode, decide_write
 from metarelay.core.destination import Destination
 from metarelay.core.errors import ConfigurationError, NotFoundError, ValidationError
 from metarelay.core.path import ROOT, Container, LogicalPath
-from metarelay.core.preview import render_preview
+from metarelay.core.preview import preview_diff, render_preview
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
 from metarelay.core.session import StoredRecord
@@ -98,6 +98,11 @@ class MemorySession:
             remote_checksum=record_checksum(remote.record) if remote else None,
             prior_receipt=prior_receipt,
             remote_preview_checksum=preview_checksum(remote.preview) if remote else None,
+            preview_diff=lambda: preview_diff(
+                remote.record if remote else None,
+                remote.preview if remote else None,
+                format="markdown",
+            ),
         )
         if action is WriteAction.WRITE:
             preview = render_preview(record).markdown

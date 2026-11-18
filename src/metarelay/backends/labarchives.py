@@ -96,7 +96,7 @@ from metarelay.core.errors import (
     ValidationError,
 )
 from metarelay.core.path import ROOT, Container, LogicalPath
-from metarelay.core.preview import render_preview
+from metarelay.core.preview import preview_diff, render_preview
 from metarelay.core.receipt import FileReceipt, Receipt
 from metarelay.core.record import Record
 from metarelay.core.session import StoredRecord
@@ -374,6 +374,12 @@ class LabArchivesSession:
                 prior_receipt=prior_receipt,
                 remote_preview_checksum=(
                     preview_checksum(preview_entry.content) if preview_entry else None
+                ),
+                # LabArchives cleans up stored HTML, so this is best effort.
+                preview_diff=lambda: preview_diff(
+                    remote_bytes,
+                    preview_entry.content if preview_entry else None,
+                    format="html",
                 ),
             )
 

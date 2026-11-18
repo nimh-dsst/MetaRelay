@@ -3,7 +3,8 @@
 - **Status:** Accepted 2026-11-13. Confirmed by DSST on 2026-11-16: many
   records per entry (Decision 2), refusing to overwrite hand edits until
   someone chooses to (D7, Decision 3), experiments, categories left to the
-  lab, eLabFTW 6.0.9, and lookups limited to the API key's team.
+  lab, eLabFTW 6.0.9, and lookups limited to the API key's team. DSST also
+  asked to see what a hand edit changed; see Decision 3.
 - **Issue:** #6. Plan §3.3, D3, D7, R2.
 - **Tested against:** eLabFTW 6.0.9 (`elabftw/elabimg:6.0.9`) with
   `elabapi-python` 6.0.1, using the dev stack in `compose.yaml`.
@@ -122,6 +123,22 @@ So each write rebuilds the whole body and `extra_fields` from the records in
 `force` replaces the whole entry's tables and fields, including hand edits to
 other records' sections. The error message says so.
 
+**The conflict says what changed.** DSST asked for MetaRelay to read hand
+edits, while keeping D7 (nothing changes without someone approving it). So
+the `ConflictError` carries a `PreviewDiff`: each value that differs from
+what MetaRelay wrote (rebuilt from the stored records), in a field or in the
+body's tables, with its record ID, table and row, and whether that list is
+complete. Fields are compared exactly. The body is compared by its text, as
+on LabArchives, because the editor rewrites the HTML (it adds styles and
+wraps cells in `<p>`), and the body is where people naturally edit. It is
+complete when nothing else changed: the fields match once the listed values
+are put back, the body has the same headings and tables with nothing added,
+and the body and fields agree. MetaRelay
+never takes a value from the fields itself: when a person accepts the
+edits, `accept_edits` copies them into every edited record in the entry
+and writes them, since a forced write rebuilds the whole entry. Every backend that keeps previews does the same
+(conformance: `test_preview_edit_says_what_changed`).
+
 ### 4. An adapter isolates `elabapi-python` (R2)
 
 Everything that touches the generated client (and raw responses, for
@@ -157,5 +174,8 @@ parameter, 5.3.0 has a different `patch_experiment`). CI also tests 6.0.0.
   paths still work; their deepest prefixes just have no tag.
 - **`extra_fields` flatten nested values.** Labels carry the record ID. The
   JSON in `metadata.metarelay` keeps the real structure.
-- **A hand edit to a field is visible but not used.** MetaRelay reports it as
-  a conflict; it never reads values back from `extra_fields` or the body.
+- **A hand edit is reported, not used, until someone accepts it.** The
+  conflict lists the old and new values from the fields and the body's
+  tables; MetaRelay copies them into a record only through `accept_edits`.
+  Body edits outside the tables (notes, renamed headings) are detected but
+  can't be listed, so they can't be accepted.

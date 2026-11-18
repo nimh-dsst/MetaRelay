@@ -27,9 +27,10 @@ pytest.importorskip("elabapi_python")
 
 from metarelay import connect
 from metarelay.backends import elabftw as backend
+from metarelay.core import preview
 from metarelay.core.auth import AuthFlow
 from metarelay.core.backend import auth_flow
-from metarelay.core.conflict import WriteMode
+from metarelay.core.conflict import WriteMode, accept_edits
 from metarelay.core.errors import (
     AuthenticationError,
     ConfigurationError,
@@ -38,6 +39,8 @@ from metarelay.core.errors import (
     ValidationError,
 )
 from metarelay.core.path import LogicalPath
+from metarelay.core.preview import PreviewDiff, PreviewEdit
+from metarelay.core.receipt import SyncIndex
 from metarelay.core.record import Record
 from metarelay.testing import BackendConformance
 
@@ -97,6 +100,13 @@ class TestElabFTWExperiments(BackendConformance):
         receipt = session.read_record(path, record_id).receipt
         entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
         api("PATCH", f"{entity}/{entry_id}", {"body": text})
+
+    def replace_in_preview(self, session, path, record_id, old, new) -> None:
+        receipt = session.read_record(path, record_id).receipt
+        fields = entry(receipt)["metadata"]["extra_fields"]
+        [label] = [label for label, field in fields.items() if field["value"] == old]
+        entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
+        api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", label: new})
 
 
 @live
@@ -194,7 +204,7 @@ def make(record_id: str = "rec-1", **payload) -> Record:
 
 def test_fields_are_grouped_per_record_and_table() -> None:
     records = {"rec-1": make("rec-1"), "rec-2": make("rec-2", label="second")}
-    body, fields, elabftw = backend._render(LogicalPath(("S", "Day 1")), "records", records)
+    body, fields, elabftw, _ = backend._render(LogicalPath(("S", "Day 1")), "records", records)
     assert body.count("<table") >= 2
     assert fields["MetaRelay path"] == {
         "type": "text",
@@ -212,10 +222,160 @@ def test_fields_are_grouped_per_record_and_table() -> None:
 
 def test_same_row_name_in_two_tables_gets_the_table_title() -> None:
     record = make(cohort="payload cohort")
-    _, fields, _ = backend._render(LogicalPath(("S",)), "records", {"rec-1": record})
+    _, fields, _, _ = backend._render(LogicalPath(("S",)), "records", {"rec-1": record})
     cohort_labels = sorted(label for label in fields if label.endswith("cohort"))
     assert len(cohort_labels) == 2
     assert all(" · " in label.removeprefix("rec-1 · ") for label in cohort_labels)
+
+
+def _saved_entry(records: dict) -> tuple[dict, dict, LogicalPath]:
+    """An entry as MetaRelay saved it, and its ``metadata.metarelay``."""
+    path = LogicalPath(("S",))
+    body, fields, _, _ = backend._render(path, "records", records)
+    ours = {"kind": "records", "preview_checksum": backend._entry_checksum(body, fields)}
+    return {"body": body, "metadata": {"extra_fields": fields}}, ours, path
+
+
+def _diff(change) -> PreviewDiff:
+    records = {"rec-1": make("rec-1"), "rec-2": make("rec-2", count="3")}
+    entry, ours, path = _saved_entry(records)
+    change(entry, entry["metadata"]["extra_fields"])
+    return backend._entry_diff(entry, ours, path, records)
+
+
+def _edit(record_id, field, written, current) -> PreviewEdit:
+    return PreviewEdit(
+        record_id=record_id, table="Metadata", field=field, written=written, current=current
+    )
+
+
+def test_field_diff_lists_a_changed_value() -> None:
+    diff = _diff(lambda entry, fields: fields["rec-2 · label"].update(value="x"))
+    assert diff == PreviewDiff(edits=[_edit("rec-2", "label", "first", "x")], complete=True)
+
+
+def test_field_diff_lists_a_removed_field_as_complete() -> None:
+    diff = _diff(lambda entry, fields: fields.pop("rec-1 · label"))
+    assert diff == PreviewDiff(edits=[_edit("rec-1", "label", "first", None)], complete=True)
+
+
+def test_field_diff_keeps_non_text_values() -> None:
+    diff = _diff(lambda entry, fields: fields["rec-2 · count"].update(value=0))
+    assert diff.edits == [_edit("rec-2", "count", "3", "0")]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda entry, fields: entry.update(body=entry["body"] + "<p>note</p>"),
+        lambda entry, fields: fields.update({"Notes": {"type": "text", "value": "x"}}),
+        lambda entry, fields: fields["MetaRelay path"].update(value="Elsewhere"),
+        lambda entry, fields: fields["rec-1 · label"].update(type="number"),
+    ],
+    ids=["body", "added field", "path field", "field settings"],
+)
+def test_field_diff_is_incomplete_when_something_else_changed(change) -> None:
+    diff = _diff(change)
+    assert diff == PreviewDiff(edits=[], complete=False)
+
+
+def _in_body(entry, old, new, count=1) -> None:
+    """Change a body cell the way eLabFTW's editor saves it: restyled HTML."""
+    assert old in entry["body"]
+    entry["body"] = entry["body"].replace(old, new, count).replace("<td>", '<td style="w:1">')
+
+
+def test_entry_diff_lists_a_body_edit() -> None:
+    def change(entry, fields):
+        # rec-2's preview comes second, so its label is the last "first" cell.
+        before, _, after = entry["body"].rpartition("<td>first</td>")
+        entry["body"] = before + "<td>by hand</td>" + after
+
+    diff = _diff(change)
+    assert diff == PreviewDiff(edits=[_edit("rec-2", "label", "first", "by hand")], complete=True)
+
+
+def test_entry_diff_ignores_body_formatting() -> None:
+    diff = _diff(lambda entry, fields: _in_body(entry, "<td>3</td>", "<td><p>3</p></td>"))
+    assert diff == PreviewDiff(edits=[], complete=True)
+
+
+def test_entry_diff_lists_the_same_change_in_body_and_field_once() -> None:
+    def change(entry, fields):
+        _in_body(entry, "<td>3</td>", "<td>4</td>")
+        fields["rec-2 · count"].update(value="4")
+
+    assert _diff(change) == PreviewDiff(edits=[_edit("rec-2", "count", "3", "4")], complete=True)
+
+
+def test_entry_diff_is_incomplete_when_body_and_field_disagree() -> None:
+    def change(entry, fields):
+        _in_body(entry, "<td>3</td>", "<td>4</td>")
+        fields["rec-2 · count"].update(value="5")
+
+    diff = _diff(change)
+    assert diff.edits == [_edit("rec-2", "count", "3", "5"), _edit("rec-2", "count", "3", "4")]
+    assert not diff.complete
+
+
+def test_entry_diff_ignores_field_positions() -> None:
+    def change(entry, fields):
+        for position, field in enumerate(reversed(fields.values())):
+            field["position"] = position
+
+    assert _diff(change) == PreviewDiff(edits=[], complete=True)
+
+
+def test_body_diff_without_records_is_incomplete_when_a_table_was_added() -> None:
+    # A table parses cleanly, so only the block count catches it.
+    table = "<table><tr><td>a</td><td>b</td></tr></table>"
+    assert backend._body_diff("", {}) == PreviewDiff(edits=[], complete=True)
+    assert backend._body_diff(table, {}) == PreviewDiff(edits=[], complete=False)
+
+
+def test_entry_diff_matches_a_multiline_value_in_body_and_field() -> None:
+    # The body is read by its text, which collapses whitespace; the field
+    # keeps the raw value. Both must read the same to be matched.
+    records = {"rec-1": make("rec-1", label="two\nlines")}
+    entry, ours, path = _saved_entry(records)
+    entry["body"] = entry["body"].replace("two\nlines", "edited")
+    entry["metadata"]["extra_fields"]["rec-1 · label"].update(value="other")
+    diff = backend._entry_diff(entry, ours, path, records)
+    assert diff.edits == [
+        _edit("rec-1", "label", "two lines", "other"),
+        _edit("rec-1", "label", "two lines", "edited"),
+    ]
+    assert not diff.complete
+
+
+def test_entry_diff_ignores_whitespace_only_field_changes() -> None:
+    diff = _diff(lambda entry, fields: fields["rec-2 · label"].update(value=" first "))
+    assert diff == PreviewDiff(edits=[], complete=True)
+
+
+def test_body_diff_splits_a_preview_with_its_own_layout(monkeypatch) -> None:
+    # A schema's own renderer may use several headings, or none.
+    def two_headings(record):
+        return [
+            preview.Heading(text="Part one"),
+            preview.Heading(text=record.record_id),
+            preview.Table(title="Metadata", rows=[("label", record.payload["label"])]),
+        ]
+
+    records = {"rec-1": make("rec-1"), "rec-2": make("rec-2")}
+    monkeypatch.setitem(preview._renderers, TEST_SCHEMA_ID, two_headings)
+    entry, _, _ = _saved_entry(records)
+    assert backend._body_diff(entry["body"], records) == PreviewDiff(edits=[], complete=True)
+    _in_body(entry, "<td>first</td>", "<td>by hand</td>")
+    diff = backend._body_diff(entry["body"], records)
+    assert diff == PreviewDiff(edits=[_edit("rec-1", "label", "first", "by hand")], complete=True)
+
+
+def test_entry_diff_is_incomplete_when_a_record_section_is_missing() -> None:
+    def change(entry, fields):
+        entry["body"] = entry["body"].split("<hr>")[0]
+
+    assert not _diff(change).complete
 
 
 # Live behavior beyond the conformance suite
@@ -272,13 +432,114 @@ def test_editing_a_field_by_hand_conflicts(session, page) -> None:
     receipt = session.write_record(page, make())
     entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
     api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", "rec-1 · label": "x"})
-    with pytest.raises(ConflictError, match="edited directly"):
+    with pytest.raises(ConflictError, match="edited directly") as raised:
         session.write_record(page, make(label="v2"), prior_receipt=receipt)
+    assert "label: 'first' → 'x'" in str(raised.value)  # its own edit: not named
     # It blocks other records in the same entry too, until forced.
     with pytest.raises(ConflictError):
         session.write_record(page, make("rec-2"))
     session.write_record(page, make("rec-2"), mode=WriteMode.FORCE)
     assert entry(receipt)["metadata"]["extra_fields"]["rec-1 · label"]["value"] == "first"
+
+
+@live
+def test_a_conflict_lists_edits_to_other_records_in_the_entry(session, page) -> None:
+    first = session.write_record(page, make("rec-1"))
+    second = session.write_record(page, make("rec-2", site="NAc"))
+    entity, entry_id = second.backend_ids["entity"], second.backend_ids["entry_id"]
+    api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", "rec-2 · site": "VTA"})
+    # The message names rec-2, so it doesn't read as a change to rec-1.
+    with pytest.raises(ConflictError, match="site of rec-2: 'NAc' → 'VTA'") as raised:
+        session.write_record(page, make("rec-1", label="v2"), prior_receipt=first)
+    assert raised.value.preview_diff == PreviewDiff(
+        edits=[
+            PreviewEdit(
+                record_id="rec-2", table="Metadata", field="site", written="NAc", current="VTA"
+            )
+        ],
+        complete=True,
+    )
+
+
+@live
+def test_the_cli_accepts_edits_to_every_record_in_the_entry(
+    session, page, tmp_path, monkeypatch
+) -> None:
+    from metarelay.cli import main
+
+    receipt = session.write_record(page, make("rec-1"))
+    session.write_record(page, make("rec-2", count="3"))
+    entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
+    # A value with doubled spaces, and a field cleared, in another record.
+    for label, value in (("rec-1 · label", "by  hand"), ("rec-2 · count", "")):
+        api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", label: value})
+    file = tmp_path / "rec-1.json"
+    file.write_text(make("rec-1").model_dump_json())
+    receipts = tmp_path / "receipts.json"
+    index = SyncIndex()
+    index.put(receipt)
+    receipts.write_text(index.model_dump_json())
+    monkeypatch.setenv("METARELAY_ELABFTW_TOKEN", TOKEN)
+    monkeypatch.setenv("METARELAY_ELABFTW_API_URL", API_URL)
+
+    args = ["write", uri_for(), str(page), str(file), "--receipts", str(receipts)]
+    assert main([*args, "--accept-edits"]) == 0
+    stored = {s.record.record_id: s.record.payload for s in session.list_records(page)}
+    assert stored["rec-1"]["label"] == "by hand"
+    assert stored["rec-2"]["count"] == ""
+    assert json.loads(file.read_text())["payload"]["label"] == "by hand"
+    # The entry was rebuilt from the edited records, and the saved receipts
+    # describe it: writing either record next goes through.
+    saved = SyncIndex.model_validate_json(receipts.read_text())
+    rec_2 = saved.get(session.destination, page, "rec-2")
+    session.write_record(page, make("rec-2", count="4"), prior_receipt=rec_2)
+    assert main(args) == 0
+
+
+@live
+def test_a_failing_field_diff_still_raises_the_conflict(session, page, monkeypatch) -> None:
+    receipt = session.write_record(page, make())
+    entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
+    api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", "rec-1 · label": "x"})
+
+    def broken(*args):
+        raise KeyError("odd metadata")
+
+    monkeypatch.setattr(backend, "_entry_diff", broken)
+    with pytest.raises(ConflictError, match="edited directly") as raised:
+        session.write_record(page, make(label="v2"), prior_receipt=receipt)
+    assert raised.value.preview_diff is None
+
+
+@live
+def test_a_body_edit_makes_the_field_edits_incomplete(session, page) -> None:
+    receipt = session.write_record(page, make())
+    entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
+    api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", "rec-1 · label": "x"})
+    api("PATCH", f"{entity}/{entry_id}", {"body": entry(receipt)["body"] + "<p>Note</p>"})
+    with pytest.raises(ConflictError, match="can't list") as raised:
+        session.write_record(page, make(label="v2"), prior_receipt=receipt)
+    diff = raised.value.preview_diff
+    assert [(edit.field, edit.current) for edit in diff.edits] == [("label", "x")]
+    assert not diff.complete
+
+
+@live
+def test_an_edit_to_a_body_table_can_be_accepted(session, page) -> None:
+    receipt = session.write_record(page, make())
+    entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
+    body = entry(receipt)["body"]
+    assert body.count("<td>first</td>") == 1
+    # Like eLabFTW's editor: restyled cells, the value wrapped in <p>.
+    edited = body.replace("<td>first</td>", '<td style="width:30%;"><p>by hand</p></td>')
+    api("PATCH", f"{entity}/{entry_id}", {"body": edited})
+    with pytest.raises(ConflictError, match="label: 'first' → 'by hand'") as raised:
+        session.write_record(page, make(label="v2"), prior_receipt=receipt)
+    diff = raised.value.preview_diff
+    assert diff == PreviewDiff(edits=[_edit("rec-1", "label", "first", "by hand")], complete=True)
+    written = accept_edits(session, page, make(), diff)
+    assert written["rec-1"].record.payload["label"] == "by hand"
+    assert entry(receipt)["metadata"]["extra_fields"]["rec-1 · label"]["value"] == "by hand"
 
 
 @live
