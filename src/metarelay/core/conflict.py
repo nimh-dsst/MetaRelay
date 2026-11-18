@@ -137,9 +137,11 @@ def decide_write(
         and remote_preview_checksum != prior_receipt.preview_checksum
     ):
         raise _edited(
-            "The notebook entry was edited directly since it was last synced.",
+            # Every backend with previews comes here (a .md file on disk or
+            # GitHub, a LabArchives entry), so name what they share.
+            "The record's preview was edited directly since it was last synced.",
             preview_diff,
-            force=" to replace the entry.",
+            force=" to replace the preview.",
         )
 
     return WriteAction.SKIP if remote_checksum == local_checksum else WriteAction.WRITE
@@ -191,7 +193,7 @@ def accept_edits(
     *,
     registry: SchemaRegistry | None = None,
 ) -> dict[str, StoredRecord]:
-    """Keep the notebook edits a person accepted: copy them into the records and write them.
+    """Keep the preview edits a person accepted: copy them into the records and write them.
 
     ``record`` is the one whose write raised the ``ConflictError`` that
     carried ``diff``. On eLabFTW one entry holds several records, the diff
@@ -213,8 +215,8 @@ def accept_edits(
     """
     if not diff.complete:
         raise ConflictError(
-            "Someone also changed something in the entry that MetaRelay can't list, so "
-            "the edits can't be accepted automatically. Look at the entry, copy what you "
+            "Someone also changed something in the preview that MetaRelay can't list, so "
+            "the edits can't be accepted automatically. Look at the preview, copy what you "
             "want into the record, and write it with mode='force'.",
             preview_diff=diff,
         )

@@ -79,6 +79,12 @@ class TestGitHubBackend(BackendConformance):
         md_path = receipt.backend_ids["path"].removesuffix(".json") + ".md"
         self.fake.put_file(REPO, md_path, text)
 
+    def replace_in_preview(self, session, path, record_id, old, new) -> None:
+        receipt = session.read_record(path, record_id).receipt
+        md_path = receipt.backend_ids["path"].removesuffix(".json") + ".md"
+        text = self.fake.files(REPO)[md_path].decode()
+        self.fake.put_file(REPO, md_path, text.replace(old, new))
+
 
 @pytest.fixture
 def session(api_url: str):
@@ -594,6 +600,48 @@ def test_reads_come_from_one_commit(session: GitHubSession, fake: FakeGitHub, ma
     before = len(fake.requests)
     session.list_records(STUDY)
     assert sum("/git/ref/" in path for _, path in fake.requests[before:]) == 1
+
+
+def test_an_edit_on_github_can_be_accepted_into_the_record(session, fake, make_record) -> None:
+    from metarelay import ConflictError, accept_edits
+
+    receipt = session.write_record(STUDY, make_record(diameter_um=400))
+    md_path = receipt.backend_ids["path"].removesuffix(".json") + ".md"
+    fake.put_file(REPO, md_path, fake.files(REPO)[md_path].decode().replace("400.0", "250"))
+    with pytest.raises(ConflictError, match=r"'400\.0' → '250'") as raised:
+        session.write_record(STUDY, make_record(diameter_um=400), prior_receipt=receipt)
+
+    written = accept_edits(session, STUDY, make_record(diameter_um=400), raised.value.preview_diff)
+    assert written["fiber-1"].record.payload == {"diameter_um": 250.0}
+    assert "| diameter_um | 250.0 |" in fake.files(REPO)[md_path].decode()
+    # The JSON and the preview agree again, so the next write goes through.
+    next_receipt = written["fiber-1"].receipt
+    session.write_record(STUDY, make_record(diameter_um=300), prior_receipt=next_receipt)
+
+
+def test_an_edit_to_a_stale_preview_cannot_be_accepted(session, fake, make_record) -> None:
+    """When the .json was changed at GitHub without its preview, the preview
+    still shows the old record. Its old values must not read as a person's
+    edits: accepting them would undo the change to the .json."""
+    from metarelay import ConflictError, accept_edits
+
+    first = session.write_record(STUDY, make_record(diameter_um=400))
+    json_path = first.backend_ids["path"]
+    md_path = json_path.removesuffix(".json") + ".md"
+    fake.put_file(REPO, json_path, make_record(diameter_um=300).model_dump_json())
+    text = fake.files(REPO)[md_path].decode()
+    fake.put_file(REPO, md_path, text.replace("| subject_id | M1 |", "| subject_id | M2 |"))
+
+    read = session.read_record(STUDY, "fiber-1")
+    with pytest.raises(ConflictError, match="preview was edited") as raised:
+        session.write_record(STUDY, make_record(diameter_um=300), prior_receipt=read.receipt)
+    diff = raised.value.preview_diff
+    assert diff is not None and not diff.complete
+    assert diff.edits == []
+    assert "diameter_um" not in str(raised.value)
+    with pytest.raises(ConflictError, match="can't list"):
+        accept_edits(session, STUDY, make_record(diameter_um=300), diff)
+    assert session.read_record(STUDY, "fiber-1").record.payload == {"diameter_um": 300.0}
 
 
 # Found in review, checked against real GitHub
