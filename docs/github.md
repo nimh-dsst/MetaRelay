@@ -137,6 +137,7 @@ and put its location in the record.
 | 403 (other), 422 for a protected branch | `PermissionDeniedError` |
 | The record or preview changed during the write | `ConflictError` |
 | Missing repository or branch at `connect()` | `ConfigurationError` |
+| Branch deleted after `connect()`, even during a write | `NotFoundError` |
 
 ## Testing
 
