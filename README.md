@@ -55,5 +55,4 @@ expectations.
 
 ## License
 
-Released under CC0 1.0 for now. The license is under review with DSST (plan
-decision D1) and may change before the first release.
+Released under the [BSD 3-Clause License](LICENSE).

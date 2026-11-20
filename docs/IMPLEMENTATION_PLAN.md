@@ -26,7 +26,7 @@ folds in that response:
   instead of after it (D2, D5).
 - **Early large-dataset test** in Chronoxiv (R4).
 - **eLabFTW pinned to `elabimg` 6.0.9** (R2).
-- **License:** BSD-3-Clause, pending final sign-off (D1).
+- **License:** BSD-3-Clause (D1).
 
 ---
 
@@ -287,7 +287,7 @@ Updated with DSST's response in
 
 | # | Item | Decision or mitigation | Owner |
 | --- | --- | --- | --- |
-| D1 | **License.** The repo is CC0 today; Chronoxiv is GPL-3. | BSD-3-Clause (permissive, GPL-compatible). DSST agrees, pending objections from the other DSST stakeholders. Switch `LICENSE` and package metadata once confirmed, before the first PyPI release. | Tech Lead, DSST |
+| D1 | **License.** The repo started as CC0; Chronoxiv is GPL-3. | Decided: BSD-3-Clause (permissive, GPL-compatible). `LICENSE` and package metadata now use it. | Tech Lead, DSST |
 | D2 | **Chronoxiv UI stack.** Streamlit or React. | MetaRelay development continues independently; its public API is plain data, so an HTTP layer is additive. DSST is open to React. The decision weighs installation, local file access, updates, and ongoing support, not only interface flexibility. Validate one representative workflow with nontechnical users before committing to a rebuild. Decide alongside D5, before Goal 3 design work starts. | Tech Lead, Designer, DSST |
 | D3 | **eLabFTW record storage.** Uploads, `extra_fields`, or body. | Timeboxed spike, recorded as an ADR. Criteria: round-trip fidelity, in-app searchability, whether a user can find and understand the metadata in eLabFTW without Chronoxiv, and what happens when someone edits it directly (D7). | Dev |
 | D4 | **Microscopy field scope.** | MVP is simple planar immunostaining. DSST coordinates field discovery with users and confirms the target NWB extension with the DANDI developers before schema work starts. | Designer, Dev, DSST |
@@ -328,7 +328,7 @@ PRs. Labels: `goal:1a|1b|1c|2|3`, `backend:<name>`, `schema`, `infra`,
 `docs`, `chronoxiv` (filed in the Chronoxiv repo).
 
 ### Goal 1a — Multi-backend interface
-1. **Project foundation** `infra` `docs` — package scaffold and tooling (uv, ruff, pytest), CI matrix, licence decision and contributor docs, Sphinx docs site with GitHub Pages deploy workflow, PyPI trusted publishing with a first `0.x` release once the core interface and local backend land.
+1. **Project foundation** `infra` `docs` — package scaffold and tooling (uv, ruff, pytest), CI matrix, license decision and contributor docs, Sphinx docs site with GitHub Pages deploy workflow, PyPI trusted publishing with a first `0.x` release once the core interface and local backend land.
 2. **Core interface** — record, receipt, sync index, logical path/container, session protocol and write modes, auth flow, error hierarchy, schema registry, destination URIs and `connect()`, table-based preview renderers with a preview checksum on receipts (D7).
 3. **Local backend, conformance suite and CLI** — reference `file://` backend; shared conformance tests and in-memory fake every backend must pass; `metarelay` CLI; quickstart and concepts docs.
 4. **LabArchives backend** `backend:labarchives` — fake LabArchives API server first (endpoints `labapi` calls, seeded fixtures, stubbed redirect auth) plus the `docker compose` dev stack; confirm `labapi`'s base URL can be overridden (upstream PR if not); redirect auth flow, container browse/ensure, record upsert with preview and conflict logic, derivative files; cassette harness and DSST-run live smoke script; DSST acceptance test with real credentials; upstream `labapi` contributions as needed.

@@ -7,7 +7,7 @@ name = "metarelay"
 version = "0.1.0.dev0"
 description = "A backend-agnostic Python interface for writing NWB metadata to electronic lab notebooks, GitHub, and local disk."
 readme = "README.md"
-license = "CC0-1.0"
+license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 classifiers = [
