@@ -35,6 +35,7 @@ uv run ruff check .           # lint
 uv run ruff format --check .  # formatting
 uv run pytest                 # tests
 uv build                      # sdist and wheel
+uv run --group docs sphinx-build -W --keep-going -n -b html docs docs/_build/html  # docs
 ```
 
 `uv run ruff format .` and `uv run ruff check --fix .` fix most issues.
@@ -49,6 +50,27 @@ uv build                      # sdist and wheel
   that the code in the docs still matches the examples. After changing an
   example, run `uv run python tests/examples/test_docs_snippets.py` to update
   the docs.
+
+## Docs
+
+The docs site is built with [Sphinx](https://www.sphinx-doc.org/) from the
+Markdown files in `docs/`, parsed with [MyST](https://myst-parser.readthedocs.io/),
+and published to <https://nimh-dsst.github.io/MetaRelay/> on every push to `main`.
+Build it locally with the `docs` dependency group:
+
+```sh
+uv run --group docs sphinx-build -W --keep-going -n -b html docs docs/_build/html
+```
+
+Open `docs/_build/html/index.html` to read it. CI runs the same build on every
+PR, and `-W` turns every warning into an error.
+
+- Write docs in Markdown. A new page goes in a `toctree` in `docs/index.md`, or
+  the build fails.
+- Link to other pages by relative path, like `[Concepts](concepts.md)`, so the
+  link works on GitHub too. Links to files outside `docs/`, such as
+  `../examples/login.py`, become links to the file on GitHub.
+- Code in the docs comes from `examples/`. See [Tests](#tests).
 
 ## Dependencies
 

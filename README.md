@@ -41,6 +41,8 @@ pip install "metarelay[all]"          # every backend, NWB builders, test suite
 
 ## Getting started
 
+The docs are at <https://nimh-dsst.github.io/MetaRelay/>.
+
 - [Quickstart](docs/quickstart.md): write a record to a folder, read it back,
   and update it.
 - [Examples](docs/examples.md): runnable scripts for common tasks, including

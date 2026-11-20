@@ -7,7 +7,7 @@ electronic lab notebooks and other destinations. This plan covers the NIH/DSST
 engagement goals from the kickoff: Goal 1 (MetaRelay — this repo), and the
 Chronoxiv-side work in Goals 1c, 2 and 3 that depends on it.
 
-### Changes after DSST review
+## Changes after DSST review
 
 DSST responded to the proposed plan in
 [#15](https://github.com/nimh-dsst/MetaRelay/issues/15). This revision
