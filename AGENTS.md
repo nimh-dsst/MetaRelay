@@ -17,7 +17,7 @@ D7, ...) are in [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 | `src/metarelay/cli.py` | The `metarelay` command |
 | `tests/` | One folder per package folder, plus `tests/examples/` for the examples |
 | `examples/` | Runnable examples. Indexed in [`docs/examples.md`](docs/examples.md) |
-| `docs/` | User and developer docs |
+| `docs/` | User and developer docs, and the Sphinx site (`conf.py`, `index.md`) |
 | `docker/`, `compose.yaml` | The dev stack: the fake LabArchives server |
 
 ## Commands
@@ -28,6 +28,7 @@ uv run ruff check .           # lint
 uv run ruff format --check .  # formatting
 uv run pytest                 # tests, examples, and the docs drift check
 uv build                      # sdist and wheel
+uv run --group docs sphinx-build -W --keep-going -n -b html docs docs/_build/html  # docs site
 docker compose up -d          # the fake LabArchives server on port 8080
 ```
 
