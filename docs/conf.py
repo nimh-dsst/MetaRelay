@@ -68,9 +68,20 @@ html_theme_options = {
 # -- Links to files outside the site -----------------------------------------
 # The docs link to examples and source files by relative path, so the links work
 # when browsing the repository on GitHub. Those files are not pages on the site,
-# so point the links at GitHub instead.
+# so point the links at GitHub instead. Code spans and fenced code blocks are
+# left as written, since a link there is an example, not a link.
 
 LINK = re.compile(r"\]\((?P<target>[^)\s#]+)(?P<anchor>#[^)\s]*)?\)")
+CODE = re.compile(
+    r"""
+    ^[ ]{0,3}(?P<fence>(?P<char>[`~])(?P=char){2,})[^\n]*\n  # opening fence
+    .*?
+    (?:^[ ]{0,3}(?P=fence)(?P=char)*[ \t]*$|\Z)            # closing fence, or end of text
+    |
+    (?P<ticks>`+).+?(?<!`)(?P=ticks)(?!`)                   # inline code span
+    """,
+    re.MULTILINE | re.DOTALL | re.VERBOSE,
+)
 
 
 def github_links(text: str, source: Path, page: Path | None = None) -> str:
@@ -95,7 +106,14 @@ def github_links(text: str, source: Path, page: Path | None = None) -> str:
         kind = "tree" if resolved.is_dir() else "blob"
         return f"]({GITHUB}/{kind}/main/{relative}{match['anchor'] or ''})"
 
-    return LINK.sub(replace, text)
+    parts = []
+    position = 0
+    for code in CODE.finditer(text):
+        parts.append(LINK.sub(replace, text[position : code.start()]))
+        parts.append(code[0])
+        position = code.end()
+    parts.append(LINK.sub(replace, text[position:]))
+    return "".join(parts)
 
 
 def on_source_read(app, docname: str, content: list[str]) -> None:
