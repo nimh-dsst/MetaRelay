@@ -1,5 +1,11 @@
 """The conformance suite: the checks every backend must pass.
 
+The suite checks that a backend wires the shared contract up. It is not
+the place for logic and its edge cases (a row of the ``decide_write`` table,
+a preview-diff quirk): those belong in ``tests/core/``, once. Every method
+here runs once per backend, so add one only for a rule a backend could get
+wrong on its own.
+
 A backend is done when it passes this suite. To run it against a backend,
 subclass ``BackendConformance`` in a test module and provide a ``session``
 fixture that returns a fresh, empty session::

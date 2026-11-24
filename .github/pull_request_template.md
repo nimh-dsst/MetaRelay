@@ -17,6 +17,7 @@ Closes #
 ## Checklist
 
 - [ ] New behavior has tests
+- [ ] Tests are in the layer that owns the rule; no new test repeats one in another layer (see CONTRIBUTING.md)
 - [ ] Schema changes bump the schema version and include a migration
 - [ ] Docs updated if behavior or the public API changed
 - [ ] New dependencies are in the right extra
