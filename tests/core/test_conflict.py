@@ -78,12 +78,10 @@ def test_unchanged_remote_and_new_local_content_is_written() -> None:
     assert decide(remote=PRIOR, prior=receipt()) is WriteAction.WRITE
 
 
-def test_nothing_changed_anywhere_is_skipped() -> None:
-    assert decide(remote=LOCAL, prior=receipt(checksum=LOCAL)) is WriteAction.SKIP
-
-
 def test_remote_already_matches_local_is_skipped() -> None:
+    # Whether the receipt is from before this change or already matches it.
     assert decide(remote=LOCAL, prior=receipt()) is WriteAction.SKIP
+    assert decide(remote=LOCAL, prior=receipt(checksum=LOCAL)) is WriteAction.SKIP
 
 
 def test_remote_changed_since_receipt_is_a_conflict() -> None:
@@ -97,10 +95,6 @@ class TestPreviewEdits:
     def test_edited_preview_is_a_conflict(self) -> None:
         with pytest.raises(ConflictError, match="preview was edited directly"):
             decide(remote=PRIOR, prior=receipt(preview_checksum="p1"), remote_preview="p2")
-
-    def test_edited_preview_is_a_conflict_even_if_the_record_is_unchanged(self) -> None:
-        with pytest.raises(ConflictError, match="edited directly"):
-            decide(remote=LOCAL, prior=receipt(LOCAL, "p1"), remote_preview="p2")
 
     def test_untouched_preview_is_fine(self) -> None:
         assert (
@@ -137,10 +131,12 @@ def test_unknown_mode_is_rejected() -> None:
 
 
 def test_preview_conflict_advice_works() -> None:
+    # An edited preview is a conflict even if the record itself is unchanged.
     # The old message said "copy the change into the record", but only force clears it.
     prior = receipt(LOCAL, "p1")
     with pytest.raises(ConflictError, match="mode='force'") as caught:
         decide(remote=LOCAL, prior=prior, remote_preview="p2")
+    assert "edited directly" in str(caught.value)
     assert "copy it into the record first" in str(caught.value)
     assert decide(WriteMode.FORCE, remote=LOCAL, prior=prior, remote_preview="p2") is (
         WriteAction.WRITE
@@ -159,20 +155,7 @@ def test_a_preview_edit_conflict_carries_the_diff() -> None:
             preview_diff=lambda: diff,
         )
     assert raised.value.preview_diff is diff
-
-
-def test_the_diff_is_only_worked_out_for_an_edited_preview() -> None:
-    calls: list[str] = []
-    action = decide_write(
-        mode=WriteMode.UPSERT,
-        local_checksum=LOCAL,
-        remote_checksum=PRIOR,
-        prior_receipt=receipt(preview_checksum="p1"),
-        remote_preview_checksum="p1",
-        preview_diff=lambda: calls.append("called"),  # type: ignore[arg-type,func-returns-value]
-    )
-    assert action is WriteAction.WRITE
-    assert calls == []
+    # A conflict over the record itself carries no diff.
     with pytest.raises(ConflictError) as raised:
         decide(remote=OTHER, prior=receipt())
     assert raised.value.preview_diff is None
@@ -246,10 +229,14 @@ class TestEntryEdits:
     def decide(mode=WriteMode.UPSERT, remote=None, prior=None, **kwargs) -> WriteAction:
         return decide(mode, remote, prior, entry_edited=True, **kwargs)
 
-    @pytest.mark.parametrize("mode", [WriteMode.UPSERT, WriteMode.CREATE])
-    def test_it_blocks_a_new_record(self, mode) -> None:
-        with pytest.raises(ConflictError, match="entry holding this record was edited"):
-            self.decide(mode=mode)
+    @pytest.mark.parametrize(
+        ("mode", "prior"),
+        [(WriteMode.UPSERT, None), (WriteMode.CREATE, None), (WriteMode.UPSERT, receipt())],
+        ids=["upsert", "create", "deleted since the receipt"],
+    )
+    def test_it_blocks_a_new_record(self, mode, prior) -> None:
+        with pytest.raises(ConflictError, match="entry holding this record was edited directly"):
+            self.decide(mode=mode, prior=prior)
 
     def test_it_blocks_a_changed_record(self) -> None:
         with pytest.raises(ConflictError, match="edited directly"):
@@ -262,10 +249,6 @@ class TestEntryEdits:
 
     def test_identical_content_with_no_receipt_is_not_a_conflict(self) -> None:
         assert self.decide(remote=LOCAL) is WriteAction.SKIP
-
-    def test_a_record_deleted_since_the_receipt_is_still_blocked(self) -> None:
-        with pytest.raises(ConflictError, match="edited directly"):
-            self.decide(prior=receipt())
 
     @pytest.mark.parametrize("remote", [None, PRIOR])
     def test_force_writes(self, remote) -> None:
@@ -294,22 +277,34 @@ class TestEntryEdits:
             self.decide(preview_diff=broken)
         assert raised.value.preview_diff is None
 
-    def test_an_unedited_entry_changes_nothing(self) -> None:
-        assert decide(entry_edited=False) is WriteAction.WRITE
-
     @pytest.mark.parametrize(
-        ("edited", "mode", "remote", "has_receipt"),
+        ("edited", "mode", "remote", "prior", "remote_preview"),
         [
-            (False, WriteMode.UPSERT, None, False),
-            (False, WriteMode.UPSERT, PRIOR, True),
-            (True, WriteMode.UPSERT, LOCAL, False),
-            (True, WriteMode.FORCE, PRIOR, True),
+            (False, WriteMode.UPSERT, None, None, None),
+            (False, WriteMode.UPSERT, PRIOR, receipt(), None),
+            (False, WriteMode.UPSERT, PRIOR, receipt(preview_checksum="p1"), "p1"),
+            (True, WriteMode.UPSERT, LOCAL, None, None),
+            (True, WriteMode.FORCE, PRIOR, receipt(), None),
         ],
-        ids=["not edited, new", "not edited, update", "identical, no receipt", "force"],
+        ids=[
+            "not edited, new",
+            "not edited, update",
+            "untouched preview",
+            "identical, no receipt",
+            "force",
+        ],
     )
-    def test_the_diff_is_built_only_for_a_conflict(self, edited, mode, remote, has_receipt):
+    def test_the_diff_is_built_only_for_a_conflict(
+        self, edited, mode, remote, prior, remote_preview
+    ):
         # Building it reads and renders the whole entry: not on every write.
         calls: list[None] = []
-        prior = receipt() if has_receipt else None
-        decide(mode, remote, prior, entry_edited=edited, preview_diff=lambda: calls.append(None))
+        decide(
+            mode,
+            remote,
+            prior,
+            remote_preview,
+            entry_edited=edited,
+            preview_diff=lambda: calls.append(None),
+        )
         assert calls == []
