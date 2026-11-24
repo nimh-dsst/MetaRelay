@@ -65,7 +65,19 @@ uv run --group docs sphinx-build -W --keep-going -n -b html docs docs/_build/htm
   live checks are opt-in and need credentials. Run them before each release,
   and after changing that backend or its fake: the fakes only behave the way
   we wrote them.
-- Add a test for every bug fix and every new behavior.
+- Add a test for every bug fix and every new behavior, in the one layer that
+  owns the rule. Don't test a rule again in another layer:
+
+  | Layer | Owns | Example |
+  | --- | --- | --- |
+  | `tests/core/` | Logic and its edge cases | A row of the `decide_write` table, a preview-diff quirk |
+  | `BackendConformance` | That every backend wires the contract up | A missing container is `NotFoundError` on every backend |
+  | `tests/backends/`, `tests/testing/` | One backend's own storage, races and errors | GitHub retries a racing commit; local refuses `CON` |
+  | `tests/examples/` | What each example itself prints and handles | The LabArchives example hides the signed login link |
+
+  In a parametrized table, keep one case per branch of the code, not one per
+  value. Don't test what a library guarantees: pydantic round trips, enum
+  values, hashes. A test must fail when the rule it checks breaks.
 - `tests/examples/` runs every example in `examples/` end to end, and checks
   that the code in the docs still matches the examples. After changing an
   example, run `uv run python tests/examples/test_docs_snippets.py` to update

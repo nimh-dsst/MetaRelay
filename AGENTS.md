@@ -62,7 +62,11 @@ install and once with all extras. `uv run ruff format .` and
   `MemorySession`, the fake servers, or recorded cassettes. eLabFTW tests run
   against the real eLabFTW from `compose.yaml` and skip without it. Live
   checks are opt-in; see the Tests section of `CONTRIBUTING.md`.
-- **Every bug fix and new behavior gets a test.** A new backend must pass
+- **Every bug fix and new behavior gets a test, in the one layer that owns
+  the rule.** Core owns logic, conformance owns per-backend wiring, a backend's
+  own tests own its storage, and an example's tests own its output. Before
+  adding a test, check that no other layer already covers the rule; see the
+  Tests section of `CONTRIBUTING.md`. A new backend must pass
   `metarelay.testing.BackendConformance`.
 - **Docs code comes from the examples.** Code between `# [docs:<name>]` and
   `# [/docs:<name>]` in `examples/` is copied into the docs after a
