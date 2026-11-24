@@ -22,10 +22,10 @@ from urllib.parse import urlsplit
 
 import pydantic
 import pytest
-import urllib3
 
 pytest.importorskip("elabapi_python")
 
+import urllib3  # a dependency of elabapi-python, so only after the skip
 from elabapi_python.rest import ApiException
 
 from metarelay import connect
