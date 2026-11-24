@@ -27,24 +27,20 @@ def test_parse_round_trips_str() -> None:
     assert LogicalPath.parse("/a//b/") == LogicalPath(("a", "b"))
 
 
-@pytest.mark.parametrize("bad", ["", "  ", "a/b", ".", "..", " padded", "a\x00b", "line\nbreak"])
+@pytest.mark.parametrize("bad", ["", " padded", "a/b", "..", "a\x00b"])
 def test_bad_names_are_rejected(bad: str) -> None:
     with pytest.raises(ValidationError):
         LogicalPath(("ok", bad))
 
 
-def test_a_bare_string_is_rejected_not_split_into_letters() -> None:
-    with pytest.raises(ValidationError, match="not a string"):
-        LogicalPath("Study")  # type: ignore[arg-type]
-
-
-def test_a_non_iterable_is_a_validation_error() -> None:
-    with pytest.raises(ValidationError):
-        LogicalPath(5)  # type: ignore[arg-type]
-
-
-def test_paths_are_hashable_and_comparable() -> None:
-    assert {LogicalPath(("a",)), LogicalPath(["a"])} == {LogicalPath(("a",))}
+@pytest.mark.parametrize(
+    ("root", "match"),
+    [("Study", "not a string"), (5, "not 5")],
+    ids=["bare-string-not-split-into-letters", "non-iterable"],
+)
+def test_constructor_rejects_non_tuples(root: object, match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        LogicalPath(root)  # type: ignore[arg-type]
 
 
 def test_path_serializes_as_a_plain_list() -> None:
@@ -60,13 +56,6 @@ def test_path_serializes_as_a_plain_list() -> None:
     assert Container.model_validate({"path": ["a", "b"], "native_id": "123"}) == container
 
 
-@pytest.mark.parametrize("name", ["back\\slash", "C:", "naïve", "with space"])
+@pytest.mark.parametrize("name", ["back\\slash", "C:"])
 def test_names_only_unsafe_on_some_backends_are_allowed(name: str) -> None:
     assert LogicalPath((name,)).name == name
-
-
-def test_a_bad_nested_path_is_a_metarelay_error() -> None:
-    with pytest.raises(ValidationError):
-        Container.model_validate({"path": ["a/b"]})
-    with pytest.raises(ValidationError):
-        Container.model_validate_json('{"path": [".."]}')

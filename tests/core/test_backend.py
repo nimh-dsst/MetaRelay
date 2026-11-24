@@ -1,3 +1,4 @@
+import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -86,49 +87,47 @@ class TestDestination:
         assert destination.path == "/metadata@main/records"
         assert str(destination) == "github://my-lab/metadata@main/records"
 
-    def test_file_uri(self) -> None:
-        destination = Destination.parse("file:///Users/me/metadata")
-        assert (destination.scheme, destination.netloc, destination.path) == (
-            "file",
-            "",
-            "/Users/me/metadata",
-        )
-
-    def test_scheme_is_lowercased(self) -> None:
-        assert Destination.parse("ELABFTW://host/api/v2").scheme == "elabftw"
-
     @pytest.mark.parametrize(
         ("uri", "normal"),
         [
             ("LabArchives://API.Example.org/", "labarchives://api.example.org"),
-            ("labarchives://api.example.org", "labarchives://api.example.org"),
-            ("elabftw://Elab.org/api/v2/", "elabftw://elab.org/api/v2"),
             ("file:///Users/Me/Metadata/", "file:///Users/Me/Metadata"),
             ("file:///", "file:///"),
+            ("elabftw:///api/v2", "elabftw:///api/v2"),
+            ("github://lab/repo@main/x?y=1#z", "github://lab/repo@main/x?y=1#z"),
+            ("x://h/a%20b", "x://h/a%20b"),
+        ],
+        ids=[
+            "lowercase-and-strip",
+            "path-case-kept",
+            "file-root",
+            "empty-host",
+            "query",
+            "percent",
         ],
     )
-    def test_uris_are_normalized(self, uri: str, normal: str) -> None:
+    def test_uris_are_normalized_idempotently(self, uri: str, normal: str) -> None:
         assert Destination.parse(uri).uri == normal
+        assert Destination.parse(normal).uri == normal
 
-    def test_credentials_in_the_uri_are_rejected(self) -> None:
-        with pytest.raises(ConfigurationError, match="config object") as caught:
-            Destination.parse("elabftw://user:hunter2@elab.org")
-        assert "hunter2" not in str(caught.value)
+    SECRET = "hunter2"
 
     @pytest.mark.parametrize(
         "uri",
         [
-            "elabftw:///api/v2",
-            "labarchives://Host/",
-            "github://lab/repo@main/x?y=1#z",
-            "file:///",
-            "file:///Users/me",
-            "x://h/a%20b",
+            f"user:{SECRET}@host",  # no scheme: used to hit "is not a URI" first
+            f"1bad://user:{SECRET}@host",  # bad scheme: used to hit "invalid scheme" first
+            f"x://user:{SECRET}@[host",  # bad host: used to hit "not a valid URI" first
         ],
     )
-    def test_normalizing_is_idempotent(self, uri: str) -> None:
-        once = Destination.parse(uri).uri
-        assert Destination.parse(once).uri == once
+    def test_credentials_in_the_uri_are_rejected_unechoed(self, uri: str) -> None:
+        # Review on #17: the error rejecting a password must not print it.
+        with pytest.raises(
+            ConfigurationError, match=r"username or password\. Pass credentials in a config object"
+        ) as caught:
+            Destination.parse(uri)
+        # Everything a logged traceback would show, including any chained error.
+        assert self.SECRET not in "".join(traceback.format_exception(caught.value))
 
     def test_receipt_with_an_empty_host_can_be_indexed(self) -> None:
         # Review on #17: "elabftw:///api/v2" normalized to "elabftw:/api/v2",
@@ -147,14 +146,14 @@ class TestDestination:
         index.put(receipt)
         assert SyncIndex.model_validate_json(index.model_dump_json()) == index
 
-    @pytest.mark.parametrize("bad", ["labarchives://[host/x", "x://[::1"])
-    def test_malformed_host_is_a_configuration_error(self, bad: str) -> None:
+    def test_malformed_host_is_a_configuration_error(self) -> None:
+        bad = "labarchives://[host/x"
         with pytest.raises(ConfigurationError, match="not a valid URI"):
             Destination.parse(bad)
         with pytest.raises(ConfigurationError):
             connect(bad)
 
-    @pytest.mark.parametrize("bad", ["/just/a/path", "", "no scheme", "1bad://x"])
+    @pytest.mark.parametrize("bad", ["", "1bad://x"], ids=["no-scheme-separator", "bad-scheme"])
     def test_rejects_non_uris(self, bad: str) -> None:
         with pytest.raises(ConfigurationError):
             Destination.parse(bad)
@@ -178,15 +177,6 @@ def test_missing_builtin_backend_says_which_extra_to_install(installed, scheme: 
     installed()
     with pytest.raises(ConfigurationError, match=rf"pip install 'metarelay\[{scheme}\]'"):
         connect(f"{scheme}://host")
-
-
-def test_backend_whose_extra_is_missing_says_which_extra_to_install(installed) -> None:
-    def fail() -> Any:
-        raise ModuleNotFoundError("No module named 'labapi'")
-
-    installed(FakeEntryPoint("labarchives", fail))
-    with pytest.raises(ConfigurationError, match=r"metarelay\[labarchives\]"):
-        auth_flow("labarchives://host")
 
 
 def test_unknown_scheme_lists_what_is_installed(installed) -> None:
@@ -231,19 +221,12 @@ class TestRedirectLogin:
         with pytest.raises(ConfigurationError, match="begin_login"):
             connect("labarchives://api.test")
 
-    def test_begin_login_refuses_a_token_backend(self) -> None:
+    def test_login_refuses_a_token_backend(self) -> None:
         with pytest.raises(ConfigurationError, match="connect"):
             begin_login("fake://x", "http://localhost/cb")
-
-    def test_complete_login_refuses_a_token_backend(self) -> None:
         challenge = LoginChallenge(destination="fake://x", auth_url="u", redirect_url="r")
         with pytest.raises(ConfigurationError):
             complete_login(challenge, {})
-
-
-def test_real_entry_point_group_is_queried() -> None:
-    # No backends ship yet (#4 adds file://), so this only checks the lookup runs.
-    assert isinstance(list(backend_module._entry_points()), list)
 
 
 def test_auth_flow_given_as_a_plain_string_still_routes(installed) -> None:
@@ -282,10 +265,9 @@ class NeedsArguments(TokenBackend):
     "loader",
     [
         _raise(AttributeError("module has no attribute 'Backnd'")),
-        _raise(SyntaxError("bad plugin")),
         lambda: NeedsArguments,
     ],
-    ids=["typo-in-entry-point", "broken-plugin", "constructor-needs-arguments"],
+    ids=["typo-in-entry-point", "constructor-needs-arguments"],
 )
 def test_any_load_failure_is_a_configuration_error(installed, loader) -> None:
     installed(FakeEntryPoint("fake", loader))

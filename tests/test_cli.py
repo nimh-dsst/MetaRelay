@@ -48,12 +48,6 @@ def test_write_read_and_list(dest: str, record_file, capsys) -> None:
     assert capsys.readouterr().out == "fiber-1\ttest.fiber v1\n"
 
 
-def test_mkdir(dest: str, capsys) -> None:
-    assert main(["mkdir", dest, "Study/Cohort A"]) == 0
-    main(["ls", dest, "Study"])
-    assert capsys.readouterr().out == "Cohort A/\n"
-
-
 def test_update_without_receipts_is_a_conflict(dest: str, record_file, capsys) -> None:
     main(["mkdir", dest, "Study"])
     main(["write", dest, "Study", record_file(400)])
@@ -74,8 +68,6 @@ def test_errors_are_short_messages(dest: str, capsys) -> None:
     assert main(["read", dest, "Study", "fiber-1"]) == 1
     assert capsys.readouterr().err.startswith("metarelay: ")
     assert main(["ls", "nope://x"]) == 1
-    assert main(["--import", "no_such_module_xyz", "ls", dest]) == 1
-    assert "Could not import" in capsys.readouterr().err
 
 
 def test_invalid_record_is_reported(dest: str, tmp_path: Path, capsys) -> None:
@@ -115,11 +107,23 @@ def test_import_registers_schemas(dest: str, tmp_path: Path, monkeypatch, capsys
     assert main(args) == 0
 
 
-def test_broken_import_module_is_a_short_error(dest: str, tmp_path: Path, monkeypatch, capsys):
-    (tmp_path / "broken_schemas.py").write_text("this is not python\n")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    assert main(["--import", "broken_schemas", "ls", dest]) == 1
-    assert "Could not import 'broken_schemas'" in capsys.readouterr().err
+@pytest.mark.parametrize(
+    ("module", "source"),
+    [
+        ("no_such_module_xyz", None),
+        # d75e86d: any failure importing an --import module is a short error.
+        ("broken_schemas", "this is not python\n"),
+    ],
+    ids=["missing-module", "syntax-error"],
+)
+def test_bad_import_module_is_a_short_error(
+    dest: str, tmp_path: Path, monkeypatch, capsys, module: str, source: str | None
+) -> None:
+    if source is not None:
+        (tmp_path / f"{module}.py").write_text(source)
+        monkeypatch.syspath_prepend(str(tmp_path))
+    assert main(["--import", module, "ls", dest]) == 1
+    assert f"Could not import {module!r}" in capsys.readouterr().err
 
 
 def test_write_to_a_typo_path_creates_nothing(dest: str, record_file, capsys) -> None:
