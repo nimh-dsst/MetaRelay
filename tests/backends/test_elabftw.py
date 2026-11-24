@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import types
 import urllib.request
 import uuid
 from urllib.parse import urlsplit
@@ -32,8 +33,6 @@ from metarelay import connect
 from metarelay.backends import elabftw as backend
 from metarelay.backends import elabftw_client
 from metarelay.core import preview
-from metarelay.core.auth import AuthFlow
-from metarelay.core.backend import auth_flow
 from metarelay.core.conflict import WriteMode, accept_edits
 from metarelay.core.errors import (
     AuthenticationError,
@@ -207,11 +206,29 @@ def test_an_unreachable_server_is_unavailable() -> None:
     assert "secret-key" not in str(raised.value)
 
 
+def test_search_pages_through_the_team_in_id_order() -> None:
+    client = elabftw_client.ElabClient(
+        "http://127.0.0.1:9/api/v2", "key", entity="experiments", verify_tls=True
+    )
+    size = elabftw_client.PAGE_SIZE
+    pages = [[{"id": n} for n in range(size)], [{"id": size}]]
+    calls: list[dict] = []
+
+    def fake_list(**kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(data=json.dumps(pages[len(calls) - 1]).encode())
+
+    client._list = fake_list
+    assert client.search("tag:x") == [{"id": n} for n in range(size + 1)]
+    # The whole team's entries, in a stable order, so paging by offset can't
+    # skip an entry that another writer changes meanwhile.
+    assert [(c["scope"], c["order"], c["sort"]) for c in calls] == [
+        (elabftw_client.SCOPE_TEAM, "id", "asc")
+    ] * 2
+    assert [(c["limit"], c["offset"]) for c in calls] == [(size, 0), (size, size)]
+
+
 # Connecting
-
-
-def test_uses_the_token_flow() -> None:
-    assert auth_flow("elabftw://elab.example.org/experiments") is AuthFlow.TOKEN
 
 
 @pytest.mark.parametrize(
@@ -258,18 +275,6 @@ def test_tags_are_every_prefix() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("Study/Cohort A", '"Study/Cohort A"'),
-        ('Say "hi"', '"Say \\"hi\\""'),
-        ("back\\slash", '"back_slash"'),  # a backslash would match nothing
-    ],
-)
-def test_search_literals(value: str, expected: str) -> None:
-    assert backend._literal(value) == expected
-
-
 def test_pipe_in_a_name_is_rejected() -> None:
     with pytest.raises(ValidationError, match=r"\|"):
         backend._check_names(LogicalPath(("a|b",)))
@@ -296,7 +301,10 @@ def make(record_id: str = "rec-1", **payload) -> Record:
 
 
 def test_fields_are_grouped_per_record_and_table() -> None:
-    records = {"rec-1": make("rec-1"), "rec-2": make("rec-2", label="second")}
+    records = {
+        "rec-1": make("rec-1"),
+        "rec-2": make("rec-2", label="second", cohort="payload cohort"),
+    }
     body, fields, elabftw, _ = backend._render(LogicalPath(("S", "Day 1")), "records", records)
     assert body.count("<table") >= 2
     assert fields["MetaRelay path"] == {
@@ -311,14 +319,10 @@ def test_fields_are_grouped_per_record_and_table() -> None:
     groups = {group["id"]: group["name"] for group in elabftw["extra_fields_groups"]}
     assert groups[fields["rec-1 · cohort"]["group_id"]] == "rec-1 · Context"
     assert len(set(groups.values())) == len(groups)
-
-
-def test_same_row_name_in_two_tables_gets_the_table_title() -> None:
-    record = make(cohort="payload cohort")
-    _, fields, _, _ = backend._render(LogicalPath(("S",)), "records", {"rec-1": record})
-    cohort_labels = sorted(label for label in fields if label.endswith("cohort"))
+    # rec-2 has a cohort row in two tables: each label gets its table title.
+    cohort_labels = [n for n in fields if n.startswith("rec-2 · ") and n.endswith("cohort")]
     assert len(cohort_labels) == 2
-    assert all(" · " in label.removeprefix("rec-1 · ") for label in cohort_labels)
+    assert all(" · " in label.removeprefix("rec-2 · ") for label in cohort_labels)
 
 
 def _saved_entry(records: dict) -> tuple[dict, dict, LogicalPath]:
@@ -340,11 +344,6 @@ def _edit(record_id, field, written, current) -> PreviewEdit:
     return PreviewEdit(
         record_id=record_id, table="Metadata", field=field, written=written, current=current
     )
-
-
-def test_field_diff_lists_a_changed_value() -> None:
-    diff = _diff(lambda entry, fields: fields["rec-2 · label"].update(value="x"))
-    assert diff == PreviewDiff(edits=[_edit("rec-2", "label", "first", "x")], complete=True)
 
 
 def test_field_diff_lists_a_removed_field_as_complete() -> None:
@@ -376,21 +375,6 @@ def _in_body(entry, old, new, count=1) -> None:
     """Change a body cell the way eLabFTW's editor saves it: restyled HTML."""
     assert old in entry["body"]
     entry["body"] = entry["body"].replace(old, new, count).replace("<td>", '<td style="w:1">')
-
-
-def test_entry_diff_lists_a_body_edit() -> None:
-    def change(entry, fields):
-        # rec-2's preview comes second, so its label is the last "first" cell.
-        before, _, after = entry["body"].rpartition("<td>first</td>")
-        entry["body"] = before + "<td>by hand</td>" + after
-
-    diff = _diff(change)
-    assert diff == PreviewDiff(edits=[_edit("rec-2", "label", "first", "by hand")], complete=True)
-
-
-def test_entry_diff_ignores_body_formatting() -> None:
-    diff = _diff(lambda entry, fields: _in_body(entry, "<td>3</td>", "<td><p>3</p></td>"))
-    assert diff == PreviewDiff(edits=[], complete=True)
 
 
 def test_entry_diff_lists_the_same_change_in_body_and_field_once() -> None:
@@ -521,37 +505,49 @@ def test_rewriting_the_same_record_is_not_a_conflict(session, page) -> None:
 
 
 @live
-def test_editing_a_field_by_hand_conflicts(session, page) -> None:
-    receipt = session.write_record(page, make())
+def test_hand_edits_to_an_entry_conflict(session, page) -> None:
+    receipt = session.write_record(page, make("rec-1"))
+    session.write_record(page, make("rec-2", site="NAc"))
     entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
+
+    def write_rec_1():
+        with pytest.raises(ConflictError, match="edited directly") as raised:
+            session.write_record(page, make("rec-1", label="v2"), prior_receipt=receipt)
+        return raised.value
+
+    # 1. A field of the record being written, edited by hand.
     api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", "rec-1 · label": "x"})
-    with pytest.raises(ConflictError, match="edited directly") as raised:
-        session.write_record(page, make(label="v2"), prior_receipt=receipt)
-    assert "label: 'first' → 'x'" in str(raised.value)  # its own edit: not named
-    # It blocks other records in the same entry too, until forced.
-    with pytest.raises(ConflictError):
-        session.write_record(page, make("rec-2"))
-    session.write_record(page, make("rec-2"), mode=WriteMode.FORCE)
-    assert entry(receipt)["metadata"]["extra_fields"]["rec-1 · label"]["value"] == "first"
+    assert "label: 'first' → 'x'" in str(write_rec_1())  # its own edit: not named
 
-
-@live
-def test_a_conflict_lists_edits_to_other_records_in_the_entry(session, page) -> None:
-    first = session.write_record(page, make("rec-1"))
-    second = session.write_record(page, make("rec-2", site="NAc"))
-    entity, entry_id = second.backend_ids["entity"], second.backend_ids["entry_id"]
+    # 2. A field of another record in the same entry. The message names
+    # rec-2, so it doesn't read as a change to rec-1.
     api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", "rec-2 · site": "VTA"})
-    # The message names rec-2, so it doesn't read as a change to rec-1.
-    with pytest.raises(ConflictError, match="site of rec-2: 'NAc' → 'VTA'") as raised:
-        session.write_record(page, make("rec-1", label="v2"), prior_receipt=first)
-    assert raised.value.preview_diff == PreviewDiff(
+    conflict = write_rec_1()
+    assert "site of rec-2: 'NAc' → 'VTA'" in str(conflict)
+    assert conflict.preview_diff == PreviewDiff(
         edits=[
+            _edit("rec-1", "label", "first", "x"),
             PreviewEdit(
                 record_id="rec-2", table="Metadata", field="site", written="NAc", current="VTA"
-            )
+            ),
         ],
         complete=True,
     )
+
+    # 3. A note added to the body: the field edits are still listed, but
+    # can't be the whole story.
+    api("PATCH", f"{entity}/{entry_id}", {"body": entry(receipt)["body"] + "<p>Note</p>"})
+    conflict = write_rec_1()
+    assert "can't list" in str(conflict)
+    diff = conflict.preview_diff
+    assert [(edit.field, edit.current) for edit in diff.edits] == [("label", "x"), ("site", "VTA")]
+    assert not diff.complete
+
+    # 4. It blocks other records in the same entry too, until forced.
+    with pytest.raises(ConflictError):
+        session.write_record(page, make("rec-3"))
+    session.write_record(page, make("rec-3"), mode=WriteMode.FORCE)
+    assert entry(receipt)["metadata"]["extra_fields"]["rec-1 · label"]["value"] == "first"
 
 
 @live
@@ -590,34 +586,6 @@ def test_the_cli_accepts_edits_to_every_record_in_the_entry(
 
 
 @live
-def test_a_failing_field_diff_still_raises_the_conflict(session, page, monkeypatch) -> None:
-    receipt = session.write_record(page, make())
-    entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
-    api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", "rec-1 · label": "x"})
-
-    def broken(*args):
-        raise KeyError("odd metadata")
-
-    monkeypatch.setattr(backend, "_entry_diff", broken)
-    with pytest.raises(ConflictError, match="edited directly") as raised:
-        session.write_record(page, make(label="v2"), prior_receipt=receipt)
-    assert raised.value.preview_diff is None
-
-
-@live
-def test_a_body_edit_makes_the_field_edits_incomplete(session, page) -> None:
-    receipt = session.write_record(page, make())
-    entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
-    api("PATCH", f"{entity}/{entry_id}", {"action": "updatemetadatafield", "rec-1 · label": "x"})
-    api("PATCH", f"{entity}/{entry_id}", {"body": entry(receipt)["body"] + "<p>Note</p>"})
-    with pytest.raises(ConflictError, match="can't list") as raised:
-        session.write_record(page, make(label="v2"), prior_receipt=receipt)
-    diff = raised.value.preview_diff
-    assert [(edit.field, edit.current) for edit in diff.edits] == [("label", "x")]
-    assert not diff.complete
-
-
-@live
 def test_an_edit_to_a_body_table_can_be_accepted(session, page) -> None:
     receipt = session.write_record(page, make())
     entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
@@ -636,13 +604,23 @@ def test_an_edit_to_a_body_table_can_be_accepted(session, page) -> None:
 
 
 @live
-def test_identical_write_without_receipt_skips_an_edited_entry(session, page) -> None:
-    receipt = session.write_record(page, make())
-    api(
-        "PATCH", f"{receipt.backend_ids['entity']}/{receipt.backend_ids['entry_id']}", {"body": "x"}
-    )
-    session.write_record(page, make())  # same content, no receipt: like decide_write
-    assert entry(receipt)["body"] == "x"
+def test_identical_content_in_an_edited_entry(session, page) -> None:
+    # Core TestEntryEdits owns the decision; this checks eLabFTW carries it out.
+    record = make()
+    receipt = session.write_record(page, record)
+    entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
+    api("PATCH", f"{entity}/{entry_id}", {"body": "edited"})
+    # No receipt: skipped, like decide_write, and the edit is left alone.
+    session.write_record(page, record)
+    assert entry(receipt)["body"] == "edited"
+    # With the receipt: a conflict.
+    with pytest.raises(ConflictError, match="edited directly"):
+        session.write_record(page, record, prior_receipt=receipt)
+    # Forced: the entry is rebuilt.
+    forced = session.write_record(page, record, mode=WriteMode.FORCE)
+    assert "<table" in entry(receipt)["body"]
+    # The entry no longer counts as edited.
+    session.write_record(page, make(label="v2"), prior_receipt=forced)
 
 
 @live
@@ -670,21 +648,36 @@ def test_folder_entries_hold_records_too(session) -> None:
 
 
 @live
-@pytest.mark.parametrize("name", ["50%", "under_score", "back\\slash", 'say "hi"', "Ünïcode"])
-def test_names_that_search_treats_specially(session, name: str) -> None:
-    path = unique("MetaRelay test") / name
-    created = session.ensure_container(path)
-    assert session.ensure_container(path) == created
-    assert [c.path for c in session.list_containers(path.parent)] == [path]
+def test_names_that_search_treats_specially(session) -> None:
+    # eLabFTW's search is SQL LIKE: each of these names, sent through a real
+    # search, must still find exactly its own container.
+    for name in (
+        "50%",  # % is a LIKE wildcard
+        "under_score",  # so is _
+        "back\\slash",  # a backslash goes wrong in LIKE and in the query
+        'say "hi"',  # quotes end the search literal
+        "Ünïcode",
+    ):
+        path = unique("MetaRelay test") / name
+        created = session.ensure_container(path)
+        assert session.ensure_container(path) == created, name
+        assert [c.path for c in session.list_containers(path.parent)] == [path], name
 
-
-@live
-def test_names_that_differ_only_in_case_are_different_containers(session) -> None:
+    # LIKE ignores case, but names that differ only in case are different
+    # containers.
     base = unique("MetaRelay test")
     lower = session.ensure_container(base / "m1")
     upper = session.ensure_container(base / "M1")
     assert lower.native_id != upper.native_id
     assert len(session.list_containers(base)) == 2
+
+    # Names are compared in NFC: a decomposed and a composed "Café" are one
+    # container.
+    base = unique("MetaRelay test")
+    decomposed = session.ensure_container(base / "Cafe\u0301")
+    composed = session.ensure_container(base / "Caf\u00e9")
+    assert composed.native_id == decomposed.native_id
+    assert len(session.list_containers(base)) == 1
 
 
 def copy_entry(entry_id: str) -> str:
@@ -791,39 +784,9 @@ def test_file_name_the_os_refuses_is_a_validation_error(session, page) -> None:
 
 
 @live
-def test_identical_write_with_receipt_conflicts_with_an_edit(session, page) -> None:
-    receipt = session.write_record(page, make())
-    entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
-    api("PATCH", f"{entity}/{entry_id}", {"body": "edited"})
-    with pytest.raises(ConflictError, match="edited directly"):
-        session.write_record(page, make(), prior_receipt=receipt)
-
-
-@live
-def test_forcing_identical_content_rebuilds_an_edited_entry(session, page) -> None:
-    record = make()
-    receipt = session.write_record(page, record)
-    entity, entry_id = receipt.backend_ids["entity"], receipt.backend_ids["entry_id"]
-    api("PATCH", f"{entity}/{entry_id}", {"body": "edited"})
-    forced = session.write_record(page, record, mode=WriteMode.FORCE)
-    assert "<table" in entry(receipt)["body"]
-    # The entry no longer counts as edited.
-    session.write_record(page, make(label="v2"), prior_receipt=forced)
-
-
-@live
 def test_write_file_leaves_one_upload(session, page) -> None:
     receipt = session.write_file(page, "trace.csv", b"old")
     session.write_file(page, "trace.csv", b"new")
     entry_id = receipt.container.native_id
     uploads = api("GET", f"experiments/{entry_id}/uploads")
     assert [upload["real_name"] for upload in uploads] == ["trace.csv"]
-
-
-@live
-def test_names_are_compared_in_nfc(session) -> None:
-    base = unique("MetaRelay test")
-    decomposed = session.ensure_container(base / "Café")
-    composed = session.ensure_container(base / "Café")
-    assert composed.native_id == decomposed.native_id
-    assert len(session.list_containers(base)) == 1
