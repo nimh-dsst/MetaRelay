@@ -188,7 +188,9 @@ error.
 Strangler pattern, app usable after every PR:
 
 1. Swap record/receipt models for MetaRelay's behind a shim; migrate sync
-   indexes on load.
+   indexes on load. Chronoxiv also migrates the records it wrote before
+   MetaRelay; MetaRelay adds no legacy reader
+   ([#38](https://github.com/nimh-dsst/MetaRelay/issues/38)).
 2. Reimplement the LabArchives metadata and structure modules over the
    MetaRelay backend, keeping public function signatures so existing tests
    act as the regression suite.
@@ -207,10 +209,10 @@ FastAPI layer over MetaRelay; library work is unaffected.
 
 Acceptance for the migration goes beyond Chronoxiv's test suite:
 
-- **Existing work stays usable (D6).** Representative existing workspaces and
-  notebooks, supplied by DSST, are loaded, migrated, and checked to confirm
-  their meaning and NWB export output are unchanged. These become fixtures in
-  Chronoxiv's test suite.
+- **Existing work stays usable (D6).** Chronoxiv's CI migrates synthetic
+  fixtures of every old format. Before acceptance, DSST runs the migration on
+  real workspaces and notebooks and confirms their meaning and NWB export
+  output are unchanged.
 - **User-workflow checks at each milestone (R3).** Open existing work, edit
   and save metadata, authenticate, publish to an ELN, and export NWB.
 
@@ -292,7 +294,7 @@ Updated with DSST's response in
 | D3 | **eLabFTW record storage.** Uploads, `extra_fields`, or body. | Timeboxed spike, recorded as an ADR. Criteria: round-trip fidelity, in-app searchability, whether a user can find and understand the metadata in eLabFTW without Chronoxiv, and what happens when someone edits it directly (D7). | Dev |
 | D4 | **Microscopy field scope.** | MVP is simple planar immunostaining. DSST coordinates field discovery with users and confirms the target NWB extension with the DANDI developers before schema work starts. | Designer, Dev, DSST |
 | D5 | **Hosting and always-on deployment.** Ad hoc today; interest in an always-available, NIH-hosted internal tool. | Deployment discovery runs alongside D2, not after it. Compare a supported local installation with an institution-managed deployment (for example AWS STRIDES for IRP users). Document where data is processed and stored, and involve the responsible NIH IT and security team before choosing a cloud approach. | Tech Lead, DSST |
-| D6 | **Schema boundary for 1b.** The scope asks to "refine the metadata format" without saying where schemas live; the JSON Chronoxiv writes today is mostly its app-shaped workspace document. | Agreed: MetaRelay owns the record envelope and NDX-aligned models; Chronoxiv's workflow models and workspace document stay in Chronoxiv (§3.4). Acceptance requires loading, migrating, and checking representative existing workspaces (§3.5). | Tech Lead, DSST |
+| D6 | **Schema boundary for 1b.** The scope asks to "refine the metadata format" without saying where schemas live; the JSON Chronoxiv writes today is mostly its app-shaped workspace document. | Agreed: MetaRelay owns the record envelope and NDX-aligned models; Chronoxiv's workflow models and workspace document stay in Chronoxiv (§3.4). Chronoxiv owns the migration. Acceptance: synthetic fixtures in CI, plus a DSST run on real data (§3.5). | Tech Lead, DSST |
 | D7 | **Direct edits in the ELN.** Users can edit an entry in LabArchives or eLabFTW without going through MetaRelay. | Proposed: the JSON stays the source of truth. A change to the JSON outside MetaRelay is a conflict, as today. Receipts also store a checksum of the rendered preview, so an edit to the preview alone is detected and reported, never silently overwritten. The caller chooses to keep the edit (by editing the record) or replace it (`force`). Confirm with DSST during the eLabFTW spike. | Tech Lead, DSST |
 | R1 | **LabArchives guest account unconfirmed.** | Build fake-first against a stateful fake LabArchives API server (§4); the same contract tests run against fake and live. DSST runs a smoke script with real credentials and captures responses as cassettes, and the fake is corrected wherever it disagrees. DSST tests with real credentials before the backend is accepted. | DSST (access), Dev |
 | R2 | **eLabFTW and `elabapi-python` version drift.** | Pin eLabFTW to `elabimg` 6.0.9 (includes the PHP fix; next major release) in CI and the dev stack. An adapter layer isolates the generated client. | Dev |
@@ -343,7 +345,7 @@ PRs. Labels: `goal:1a|1b|1c|2|3`, `backend:<name>`, `schema`, `infra`,
 5. **Round-trip verification** — every schema's examples through every backend; documented versioning policy.
 
 ### Goal 1c — Demonstrate in Chronoxiv `chronoxiv`
-1. **Adopt MetaRelay models and backend** — swap record/receipt models with index migration; representative existing workspaces from DSST as migration fixtures; reimplement LabArchives metadata and structure modules over the MetaRelay backend behind existing signatures; run Chronoxiv locally against the MetaRelay dev stack.
+1. **Adopt MetaRelay models and backend** — swap record/receipt models with index migration; migration of pre-MetaRelay records, tested on synthetic fixtures; reimplement LabArchives metadata and structure modules over the MetaRelay backend behind existing signatures; run Chronoxiv locally against the MetaRelay dev stack.
 2. **Unify storage modes** — route Local JSON through the local backend; config-driven, multi-destination picker.
 3. **Replace session and auth** — MetaRelay session and auth flow on the login page; delete `labapi`-specific error handling; rebuild Chronoxiv's app models on MetaRelay schemas and register its record schemas; remove `labapi` as a direct dependency.
 4. **Service layer (conditional on D2)** — FastAPI wrapper over MetaRelay if the UI moves to React.

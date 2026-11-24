@@ -486,6 +486,32 @@ def test_other_entries_on_the_page_are_left_alone(
     assert [stored.record.record_id for stored in session.list_records(STUDY)] == ["fiber-1"]
 
 
+def test_old_chronoxiv_entries_are_left_alone(
+    session: LabArchivesSession, fake: FakeLabArchives, make_record
+) -> None:
+    # Records Chronoxiv wrote before MetaRelay. Chronoxiv migrates them (#38).
+    study = session.list_containers(LogicalPath((NOTEBOOK,)))[0]
+    page_id = fake.add_node(
+        session.list_containers(ROOT)[0].native_id, study.native_id, "Equipment", is_page=True
+    )
+    fake.add_text_entry(page_id, "<!-- chronoxiv-record:equipment --><p>Equipment</p>")
+    for filename, caption in [
+        ("equipment.json", "ChronoXIV metadata | equipment | equipment"),
+        ("M1.json", "ChronoXIV metadata | implant | implant:M1"),
+        ("M2.json", "ChronoXIV metadata | surgery | surgery:M2"),
+    ]:
+        fake.add_attachment(page_id, filename, b'{"schema_version": 3}', caption)
+    old_entries = fake.entries_on(page_id)
+
+    # Same file name as Chronoxiv's equipment attachment.
+    receipt = session.write_record(STUDY / "Equipment", make_record("equipment"))
+    updated = make_record("equipment", diameter_um=200.0)
+    session.write_record(STUDY / "Equipment", updated, prior_receipt=receipt)
+
+    assert fake.entries_on(page_id)[: len(old_entries)] == old_entries
+    assert [stored.record for stored in session.list_records(STUDY / "Equipment")] == [updated]
+
+
 def test_an_update_replaces_entries_in_place(
     session: LabArchivesSession, fake: FakeLabArchives, make_record
 ) -> None:
