@@ -139,6 +139,12 @@ for _name in [n for n in dir(TestElabFTWResources) if n.startswith("test_")]:
         setattr(TestElabFTWResources, _name, None)
 
 
+def test_the_resources_sample_names_only_real_conformance_tests() -> None:
+    # A misspelled or renamed name would otherwise drop a test silently.
+    suite = {name for name in dir(BackendConformance) if name.startswith("test_")}
+    assert not _RESOURCES_SAMPLE - suite, _RESOURCES_SAMPLE - suite
+
+
 # Errors. A real server can't be made to fail on demand, so these drive the
 # adapter's error translation directly.
 
