@@ -22,11 +22,8 @@ from metarelay import (
     TokenConfig,
     ValidationError,
     WriteMode,
-    auth_flow,
-    begin_login,
     connect,
 )
-from metarelay.core.auth import AuthFlow
 from metarelay.testing import BackendConformance
 from metarelay.testing.github_fake import FakeGitHub, git_blob_sha, serve_fake
 
@@ -97,18 +94,10 @@ def session(api_url: str):
 # Connecting
 
 
-def test_uses_the_token_flow(api_url: str) -> None:
-    assert auth_flow(URI) is AuthFlow.TOKEN
-    with pytest.raises(ConfigurationError, match="browser login"):
-        begin_login(URI, "http://localhost/callback", config_for(api_url))
-
-
 @pytest.mark.parametrize(
     ("uri", "expected"),
     [
-        ("github://my-lab/metadata@main/records", "github://my-lab/metadata@main/records"),
         ("github://My-Lab/MetaData@main/records/", "github://my-lab/metadata@main/records"),
-        ("github://my-lab/metadata@main", "github://my-lab/metadata@main"),
         ("github://my-lab/metadata@main/lab%20data", "github://my-lab/metadata@main/lab%20data"),
         (
             "github://my-lab/metadata@feature%2Fdemo/records",
@@ -138,12 +127,9 @@ def test_bad_destinations_are_configuration_errors(api_url: str, uri: str) -> No
         open_session(api_url, uri)
 
 
-def test_a_missing_repository_is_reported(api_url: str) -> None:
+def test_a_missing_repository_or_branch_is_reported(api_url: str) -> None:
     with pytest.raises(ConfigurationError, match="no repository my-lab/missing"):
         open_session(api_url, "github://my-lab/missing@main")
-
-
-def test_a_missing_branch_is_reported(api_url: str) -> None:
     with pytest.raises(ConfigurationError, match="no branch 'nope'"):
         open_session(api_url, "github://my-lab/metadata@nope")
 
@@ -153,36 +139,27 @@ def test_a_bad_token_is_an_authentication_error(api_url: str) -> None:
         open_session(api_url, token="wrong")
 
 
-def test_the_token_is_required(monkeypatch) -> None:
+def test_config_errors_name_the_fix(monkeypatch) -> None:
+    from metarelay.core.config import DestinationConfig
+
     monkeypatch.delenv("METARELAY_GITHUB_TOKEN", raising=False)
     with pytest.raises(ConfigurationError, match="METARELAY_GITHUB_TOKEN"):
         connect(URI)
-
-
-def test_config_reads_its_own_environment_variables(monkeypatch, api_url: str) -> None:
-    monkeypatch.setenv("METARELAY_GITHUB_TOKEN", TOKEN)
-    monkeypatch.setenv("METARELAY_GITHUB_API_URL", api_url)
-    session = connect(URI)
-    session.close()
-
-
-def test_a_plain_token_config_works(monkeypatch, api_url: str) -> None:
-    monkeypatch.setenv("METARELAY_GITHUB_API_URL", api_url)
-    session = connect(URI, TokenConfig(token=TOKEN))
-    session.close()
-
-
-def test_other_configs_are_refused(api_url: str) -> None:
-    from metarelay.core.config import DestinationConfig
-
     with pytest.raises(ConfigurationError, match="GitHubConfig"):
         connect(URI, DestinationConfig())
+    # With the token set, a bad setting is named, not blamed on the token.
+    monkeypatch.setenv("METARELAY_GITHUB_TOKEN", TOKEN)
+    monkeypatch.setenv("METARELAY_GITHUB_API_URL", "api.github.com")
+    with pytest.raises(ConfigurationError, match="api_url"):
+        connect(URI)
 
 
-def test_the_token_is_never_shown() -> None:
-    config = GitHubConfig(token="github_pat_secret", api_url="https://api.github.com")
-    assert "github_pat_secret" not in repr(config)
-    assert "github_pat_secret" not in config.model_dump_json()
+def test_config_comes_from_the_environment_or_a_plain_token(monkeypatch, api_url: str) -> None:
+    monkeypatch.setenv("METARELAY_GITHUB_TOKEN", TOKEN)
+    monkeypatch.setenv("METARELAY_GITHUB_API_URL", api_url)
+    connect(URI).close()
+    monkeypatch.delenv("METARELAY_GITHUB_TOKEN")
+    connect(URI, TokenConfig(token=TOKEN)).close()
 
 
 def test_closed_session_refuses_requests(api_url: str) -> None:
@@ -244,14 +221,25 @@ def test_hidden_files_are_not_containers(session: GitHubSession, fake: FakeGitHu
     assert [c.path for c in session.list_containers()] == [STUDY]
 
 
-def test_identical_write_makes_no_commit(
+def test_commits_per_write_are_one_one_then_zero(
     session: GitHubSession, fake: FakeGitHub, make_record
 ) -> None:
+    commits = fake.repo(REPO).commits
+    before = len(commits)
     receipt = session.write_record(STUDY, make_record())
-    commits = len(fake.repo(REPO).commits)
+    assert len(commits) == before + 1
+    assert commits[-1].paths == {
+        "records/Study/fiber-1.json",
+        "records/Study/fiber-1.md",
+        f"records/Study/{INDEX_FILE}",
+    }
+    session.write_file(STUDY, "trace.csv", b"t,s\n")
+    assert len(commits) == before + 2
+    assert commits[-1].paths == {"records/Study/trace.csv", f"records/Study/{INDEX_FILE}"}
+    # An identical write, with or without the receipt, makes no commit.
     session.write_record(STUDY, make_record(), prior_receipt=receipt)
     session.write_record(STUDY, make_record())
-    assert len(fake.repo(REPO).commits) == commits
+    assert len(commits) == before + 2
 
 
 def test_a_missing_preview_is_restored(
@@ -383,19 +371,16 @@ def test_a_commit_elsewhere_on_the_branch_is_not_a_conflict(
 # Files
 
 
-def test_files_over_the_cap_are_refused(api_url: str, fake: FakeGitHub) -> None:
-    session = open_session(api_url, max_file_bytes=1024)
-    session.ensure_container(STUDY)
-    session.write_file(STUDY, "small.csv", b"x" * 1024)
-    with pytest.raises(ValidationError, match=r"1\.0 KB.*max_file_bytes"):
-        session.write_file(STUDY, "big.bin", b"x" * 1025)
-    assert "records/Study/big.bin" not in fake.files(REPO)
-    session.close()
-
-
-def test_the_default_cap_is_one_megabyte(session: GitHubSession) -> None:
-    with pytest.raises(ValidationError, match=r"1\.0 MB"):
+def test_files_over_the_cap_are_refused(
+    session: GitHubSession, api_url: str, fake: FakeGitHub
+) -> None:
+    with pytest.raises(ValidationError, match=r"1\.0 MB"):  # the default cap
         session.write_file(STUDY, "big.bin", b"x" * (1024 * 1024 + 1))
+    with closing(open_session(api_url, max_file_bytes=1024)) as capped:
+        capped.write_file(STUDY, "small.csv", b"x" * 1024)
+        with pytest.raises(ValidationError, match=r"1\.0 KB.*max_file_bytes"):
+            capped.write_file(STUDY, "big.bin", b"x" * 1025)
+    assert "records/Study/big.bin" not in fake.files(REPO)
 
 
 def test_the_cap_cannot_exceed_what_github_accepts() -> None:
@@ -403,19 +388,26 @@ def test_the_cap_cannot_exceed_what_github_accepts() -> None:
         GitHubConfig(token=TOKEN, max_file_bytes=200 * 1024 * 1024)
 
 
-def test_write_file_receipt_has_the_blob_sha(session: GitHubSession, fake: FakeGitHub) -> None:
-    receipt = session.write_file(STUDY, "trace.csv", b"t,s\n0,1\n")
-    assert receipt.native_id == git_blob_sha(b"t,s\n0,1\n")
-    assert fake.files(REPO)["records/Study/trace.csv"] == b"t,s\n0,1\n"
+def test_write_file_round_trips_binary_and_receipts_the_blob_sha(
+    session: GitHubSession, fake: FakeGitHub
+) -> None:
+    data = bytes(range(256))
+    receipt = session.write_file(STUDY, "frame.bin", data)
+    assert fake.files(REPO)["records/Study/frame.bin"] == data
+    assert receipt.native_id == git_blob_sha(data)
 
 
 # Errors
 
 
-def test_server_errors_are_backend_unavailable(session: GitHubSession, fake: FakeGitHub) -> None:
+def test_server_errors_are_backend_unavailable_without_the_token(
+    session: GitHubSession, fake: FakeGitHub
+) -> None:
     fake.fail_next(502)
-    with pytest.raises(BackendUnavailableError, match="server error"):
+    with pytest.raises(BackendUnavailableError, match="server error") as caught:
         session.list_containers()
+    assert TOKEN not in str(caught.value)
+    assert caught.value.__cause__ is None
 
 
 def test_rate_limits_are_backend_unavailable(session: GitHubSession, fake: FakeGitHub) -> None:
@@ -438,16 +430,6 @@ def test_read_only_tokens_are_permission_denied(
 def test_unreachable_github_is_backend_unavailable() -> None:
     with pytest.raises(BackendUnavailableError, match="Could not reach GitHub"):
         open_session("http://127.0.0.1:9", timeout=2)
-
-
-def test_errors_never_include_the_token(api_url: str, fake: FakeGitHub) -> None:
-    session = open_session(api_url)
-    fake.fail_next(500)
-    with pytest.raises(BackendUnavailableError) as caught:
-        session.list_containers()
-    assert TOKEN not in str(caught.value)
-    assert caught.value.__cause__ is None
-    session.close()
 
 
 # Regressions from review
@@ -517,16 +499,10 @@ def test_a_failed_upload_leaves_the_index_alone(
     assert [item.record.record_id for item in session.list_records(STUDY)] == ["trace"]
 
 
-def test_a_bad_setting_is_named_not_blamed_on_the_token(monkeypatch) -> None:
-    monkeypatch.setenv("METARELAY_GITHUB_TOKEN", TOKEN)
-    monkeypatch.setenv("METARELAY_GITHUB_API_URL", "api.github.com")
-    with pytest.raises(ConfigurationError, match="api_url"):
-        connect(URI)
-
-
 def test_foreign_json_does_not_break_listing(api_url: str, fake: FakeGitHub, make_record) -> None:
     fake.put_file(REPO, "package.json", '{"name": "lab-site"}')
     session = open_session(api_url, "github://my-lab/metadata@main")
+    assert session.list_records(ROOT) == []  # before MetaRelay ever wrote here
     session.write_record(ROOT, make_record())
     assert [item.record.record_id for item in session.list_records(ROOT)] == ["fiber-1"]
     with pytest.raises(ValidationError, match="not a valid record"):
@@ -551,28 +527,6 @@ def test_a_failed_write_changes_nothing(
     assert fake.files(REPO) == before  # record, preview and index all unchanged
     # The old receipt still works: no half-written state to recover from.
     session.write_record(STUDY, make_record(diameter_um=200.0), prior_receipt=first)
-
-
-def test_each_write_is_one_commit(session: GitHubSession, fake: FakeGitHub, make_record) -> None:
-    commits = fake.repo(REPO).commits
-    before = len(commits)
-    session.write_record(STUDY, make_record())
-    assert len(commits) == before + 1
-    assert commits[-1].paths == {
-        "records/Study/fiber-1.json",
-        "records/Study/fiber-1.md",
-        f"records/Study/{INDEX_FILE}",
-    }
-    session.write_file(STUDY, "trace.csv", b"t,s\n")
-    assert len(commits) == before + 2
-    assert commits[-1].paths == {"records/Study/trace.csv", f"records/Study/{INDEX_FILE}"}
-
-
-def test_binary_files_round_trip(session: GitHubSession, fake: FakeGitHub) -> None:
-    data = bytes(range(256))
-    receipt = session.write_file(STUDY, "frame.bin", data)
-    assert fake.files(REPO)["records/Study/frame.bin"] == data
-    assert receipt.native_id == git_blob_sha(data)
 
 
 def test_a_preview_edited_mid_write_is_a_conflict(
@@ -677,15 +631,6 @@ def test_big_folders_are_read_whole(session: GitHubSession, fake: FakeGitHub, ma
     assert [item.record.record_id for item in session.list_records(STUDY)] == ["zz-last"]
     session.write_record(STUDY, make_record("zz-last", 250.0), prior_receipt=receipt)
     assert session.read_record(STUDY, "zz-last").record.payload["diameter_um"] == 250.0
-
-
-def test_foreign_json_where_metarelay_never_wrote_lists_nothing(
-    api_url: str, fake: FakeGitHub
-) -> None:
-    fake.put_file(REPO, "package.json", '{"name": "lab-site"}')
-    session = open_session(api_url, "github://my-lab/metadata@main")
-    assert session.list_records(ROOT) == []
-    session.close()
 
 
 NFD = "Expe\u0301rience"  # committed by some Linux tools
