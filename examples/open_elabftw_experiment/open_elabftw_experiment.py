@@ -42,7 +42,7 @@ class OpenedEntry:
 
     where: LogicalPath
     containers: list[Container]
-    """Entries directly inside ``where`` (at the root, the top-level ones)."""
+    """Containers directly inside ``where``: categories at the root, else entries."""
     record_ids: list[str]
     loaded: StoredRecord | None
     """The record loaded, or ``None`` if ``where`` holds no records."""
@@ -54,14 +54,15 @@ def open_entry(
     """List the entries inside ``where``, and load one of its records.
 
     Loads ``record_id``, or the first record if it is ``None``. The root
-    holds no records, only entries.
+    holds categories, and a category holds entries; neither holds records.
 
     Raises:
         NotFoundError: If there is no such entry or record.
     """
     # [docs:open-entry]
-    # eLabFTW has no folders: every container is an entry (an experiment or
-    # a resource). holds_records is True for a records-only entry.
+    # At the root, the containers are categories. Below that, eLabFTW has no
+    # folders: every container is an entry (an experiment or a resource).
+    # holds_records is True for a records-only entry.
     containers = session.list_containers(where)
 
     # An entry's records are in the entry itself: in its metadata, and shown

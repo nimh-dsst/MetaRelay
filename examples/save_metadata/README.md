@@ -107,8 +107,8 @@ export METARELAY_ELABFTW_API_URL=http://localhost:3148/api/v2
 uv run python -m examples.save_metadata elabftw://localhost:3148/experiments
 ```
 
-eLabFTW has no folders, so `Fiber study` and `Cohort A` each become an
-entry, and the record goes in the `Cohort A` entry. Use `/resources` instead
+`Fiber study` is a category, which the seed creates (MetaRelay never
+creates one). `Cohort A` becomes an entry in it, and the record goes there. Use `/resources` instead
 of `/experiments` to write resources. Then open the record with the
 [`open_elabftw_experiment` example](../open_elabftw_experiment/README.md).
 

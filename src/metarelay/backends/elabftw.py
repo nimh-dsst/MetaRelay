@@ -13,22 +13,25 @@ Connecting
     ``/resources``. Requests go to ``https://<host>/api/v2`` unless
     ``api_url`` says otherwise (the dev stack is plain ``http``).
 
-How a ``LogicalPath`` maps onto eLabFTW
-    eLabFTW has no folders, so **every container is an entry**, titled with
-    the last name in its path:
-
+How a ``LogicalPath`` maps onto eLabFTW (ADR 0002)
+    - The first name is a **category**, like a LabArchives notebook.
+      ``list_containers(ROOT)`` lists the team's categories. MetaRelay never
+      creates one: a missing category is ``NotFoundError``. Records go in
+      entries inside a category, not in the category itself.
+    - eLabFTW has no folders, so every container below a category is an
+      **entry** in that category, titled with the last name in its path.
     - ``ensure_container(path, holds_records=True)`` makes a records-only
       entry, like a LabArchives page: it holds records and can't contain
       containers (``ValidationError``).
     - Any other container is a folder entry. It holds its own records too,
       and child containers point to it.
-    - Each entry is tagged with every prefix of its path (``Study``,
-      ``Study/Cohort A``), so clicking a tag in eLabFTW works like opening a
-      folder. Tags are only for people: eLabFTW ignores their case and turns
-      ``|`` into a space, so names containing ``|`` are rejected.
     - MetaRelay finds entries through two read-only extra fields,
       ``MetaRelay path`` and ``MetaRelay parent``, then checks the exact
-      path in ``metadata.metarelay``.
+      path in ``metadata.metarelay``. Moving an entry to another category
+      in eLabFTW doesn't change where MetaRelay finds it.
+    - Tags are the kind of record: a record write adds the tag that
+      ``ElabFTWConfig.record_tags`` maps its ``schema_id`` to. MetaRelay
+      never removes a tag.
 
 How a record is stored (ADR 0001)
     All in the container's entry, written in one request:
@@ -69,6 +72,7 @@ Limits
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import unicodedata
@@ -76,7 +80,7 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import SettingsConfigDict
 
 from metarelay.backends.elabftw_client import ElabClient, Entity
@@ -115,7 +119,6 @@ FOLDER, RECORDS = "folder", "records"
 PATH_FIELD = "MetaRelay path"
 PARENT_FIELD = "MetaRelay parent"
 FILE_COMMENT = "MetaRelay file"
-TAG_MAX = 255
 _ENTITIES: dict[str, Entity] = {"/experiments": "experiments", "/resources": "items"}
 
 
@@ -132,6 +135,8 @@ class ElabFTWConfig(TokenConfig):
     """The API root. Defaults to ``https://<host from the URI>/api/v2``."""
     verify_tls: bool = True
     """Check the server's certificate. Turn off only for a local test server."""
+    record_tags: dict[str, str] = Field(default_factory=dict)
+    """The tag for each ``schema_id``. A record write tags its entry with it."""
 
     @field_validator("api_url")
     @classmethod
@@ -166,7 +171,7 @@ def _entity(destination: Destination) -> Entity:
     return entity
 
 
-# Names, tags, and lookups
+# Names and lookups
 
 
 def _nfc(text: str) -> str:
@@ -175,25 +180,6 @@ def _nfc(text: str) -> str:
 
 def _parts(path: LogicalPath) -> list[str]:
     return [_nfc(part) for part in path.parts]
-
-
-def _check_names(path: LogicalPath) -> None:
-    for part in path.parts:
-        if "|" in part:
-            raise ValidationError(
-                f"Name {part!r} can't be used in eLabFTW: its tags turn '|' into a space."
-            )
-
-
-def _tags(path: LogicalPath) -> list[str]:
-    """Every prefix of the path, for people browsing by tag.
-
-    eLabFTW can't store a tag over 255 characters (it answers HTTP 500), so
-    longer prefixes get no tag. Lookups never use tags, so nothing breaks.
-    """
-    parts = _parts(path)
-    prefixes = ["/".join(parts[: index + 1]) for index in range(len(parts))]
-    return [tag for tag in prefixes if len(tag) <= TAG_MAX]
 
 
 def _literal(value: str) -> str:
@@ -458,9 +444,12 @@ def _metadata(
 class ElabFTWSession:
     """An open connection to one eLabFTW instance and entry type."""
 
-    def __init__(self, client: ElabClient, destination: str) -> None:
+    def __init__(
+        self, client: ElabClient, destination: str, record_tags: Mapping[str, str]
+    ) -> None:
         self._client = client
         self._destination = destination
+        self._record_tags = record_tags
         self._closed = False
 
     @property
@@ -470,11 +459,18 @@ class ElabFTWSession:
     # Containers
 
     def list_containers(self, parent: LogicalPath = ROOT) -> list[Container]:
-        _check_names(parent)
-        if parent != ROOT:
-            entry, ours = self._require(parent)
-            if ours["kind"] == RECORDS:
-                return []
+        if parent == ROOT:
+            categories = []
+            for category in self._client.categories():
+                # Skip titles a path can't hold, like "11/12/2026".
+                with contextlib.suppress(ValidationError):
+                    path = LogicalPath((_nfc(category["title"]),))
+                    categories.append(Container(path=path, native_id=str(category["id"])))
+            return sorted(categories, key=lambda container: container.path.parts)
+        if len(parent.parts) == 1:
+            self._category(parent)
+        elif self._require(parent)[1]["kind"] == RECORDS:
+            return []
         wanted = _parts(parent)
         children = []
         for entry, ours in self._search(PARENT_FIELD, "/".join(wanted)):
@@ -485,11 +481,13 @@ class ElabFTWSession:
         return sorted(children, key=lambda container: container.path.parts)
 
     def ensure_container(self, path: LogicalPath, *, holds_records: bool = False) -> Container:
-        _check_names(path)
         if path == ROOT:
             return Container(path=ROOT)
+        category = self._category(path)
+        if len(path.parts) == 1:
+            return category
         found: tuple[dict[str, Any], dict[str, Any]] | None = None
-        for depth in range(1, len(path.parts) + 1):
+        for depth in range(2, len(path.parts) + 1):
             here = LogicalPath(path.parts[:depth])
             if found is not None and found[1]["kind"] == RECORDS:
                 raise ValidationError(
@@ -498,7 +496,7 @@ class ElabFTWSession:
             found = self._find(here)
             if found is None:
                 kind = RECORDS if holds_records and depth == len(path.parts) else FOLDER
-                found = self._create(here, kind)
+                found = self._create(here, kind, int(category.native_id))
         entry, ours = found
         return self._container(path, entry, ours)
 
@@ -512,8 +510,8 @@ class ElabFTWSession:
         mode: WriteMode = WriteMode.UPSERT,
         prior_receipt: Receipt | None = None,
     ) -> Receipt:
-        if path == ROOT:
-            raise ValidationError("Records go inside a container, not at the root.")
+        if len(path.parts) < 2:
+            raise ValidationError("Records go in an entry inside a category.")
         if prior_receipt is not None and prior_receipt.record_id != record.record_id:
             raise ValidationError(
                 f"prior_receipt is for {prior_receipt.record_id!r}, not {record.record_id!r}."
@@ -535,11 +533,14 @@ class ElabFTWSession:
         if action is WriteAction.WRITE:
             records[record.record_id] = record
             entry, ours = self._save(entry, path, ours["kind"], records)
+            tag = self._record_tags.get(record.schema_id)
+            if tag:
+                self._client.add_tag(int(entry["id"]), tag)
         return self._receipt(path, entry, ours, records[record.record_id])
 
     def read_record(self, path: LogicalPath, record_id: str) -> StoredRecord:
         missing = NotFoundError(f"No record {record_id!r} in {self._describe(path)}.")
-        if path == ROOT:
+        if len(path.parts) < 2:
             raise missing
         entry, ours = self._require(path)
         record = _records(ours, self._describe(path)).get(record_id)
@@ -548,7 +549,9 @@ class ElabFTWSession:
         return StoredRecord(record=record, receipt=self._receipt(path, entry, ours, record))
 
     def list_records(self, path: LogicalPath) -> list[StoredRecord]:
-        if path == ROOT:
+        if len(path.parts) < 2:  # the root and categories hold entries, not records
+            if path != ROOT:
+                self._category(path)
             return []
         entry, ours = self._require(path)
         records = _records(ours, self._describe(path))
@@ -566,8 +569,8 @@ class ElabFTWSession:
         media_type: str | None = None,
     ) -> FileReceipt:
         name = _check_file_name(name)
-        if path == ROOT:
-            raise ValidationError("Files go inside a container, not at the root.")
+        if len(path.parts) < 2:
+            raise ValidationError("Files go in an entry inside a category.")
         entry, ours = self._require(path)
         entry_id = int(entry["id"])
         old = [
@@ -598,6 +601,21 @@ class ElabFTWSession:
 
     def _describe(self, path: LogicalPath) -> str:
         return repr(str(path)) if path != ROOT else "the root"
+
+    def _category(self, path: LogicalPath) -> Container:
+        """The team's category named by the path's first name. MetaRelay never makes one."""
+        name = _parts(path)[0]
+        found = [c for c in self._client.categories() if _nfc(c["title"]) == name]
+        if not found:
+            raise NotFoundError(
+                f"No category {name!r} in eLabFTW. Create it in eLabFTW first; "
+                "MetaRelay doesn't create categories."
+            )
+        if len(found) > 1:
+            raise ConflictError(
+                f"More than one eLabFTW category is named {name!r}. Rename one in eLabFTW."
+            )
+        return Container(path=LogicalPath(path.parts[:1]), native_id=str(found[0]["id"]))
 
     def _search(self, field: str, value: str) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
         """Entries whose ``field`` may equal ``value``, with ``metadata.metarelay``
@@ -641,15 +659,16 @@ class ElabFTWSession:
         return matches[0] if matches else None
 
     def _require(self, path: LogicalPath) -> tuple[dict[str, Any], dict[str, Any]]:
-        _check_names(path)
         found = self._find(path)
         if found is None:
             raise NotFoundError(f"No container {self._describe(path)}.")
         return found
 
-    def _create(self, path: LogicalPath, kind: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _create(
+        self, path: LogicalPath, kind: str, category: int
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         body, metadata = _metadata({}, path, kind, {})
-        entry_id = self._client.create(_parts(path)[-1], _tags(path), body, metadata)
+        entry_id = self._client.create(_parts(path)[-1], category, body, metadata)
         created = self._settle(entry_id, metadata)
         # Another writer may have made it at the same moment: settle on one.
         return self._find(path) or created
@@ -736,7 +755,7 @@ class ElabFTWBackend:
         except BaseException:
             client.close()
             raise
-        return ElabFTWSession(client, destination.uri)
+        return ElabFTWSession(client, destination.uri, settings.record_tags)
 
     def begin_login(
         self, destination: Destination, redirect_url: str, config: DestinationConfig | None

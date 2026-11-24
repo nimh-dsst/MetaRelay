@@ -3,7 +3,8 @@
 The `elabftw://` backend writes records into eLabFTW experiments or resources
 through [`elabapi-python`](https://pypi.org/project/elabapi-python/). It
 targets eLabFTW 6 (CI runs `elabftw/elabimg:6.0.9`). Why it stores records
-the way it does: [ADR 0001](adr/0001-elabftw-record-storage.md).
+the way it does: [ADR 0001](adr/0001-elabftw-record-storage.md) and
+[ADR 0002](adr/0002-elabftw-categories-and-tags.md).
 
 ```bash
 pip install 'metarelay[elabftw]'
@@ -51,8 +52,9 @@ lists the entries inside a path and loads a record from it:
 
 <!-- example: open_elabftw_experiment/open_elabftw_experiment.py#open-entry -->
 ```python
-# eLabFTW has no folders: every container is an entry (an experiment or
-# a resource). holds_records is True for a records-only entry.
+# At the root, the containers are categories. Below that, eLabFTW has no
+# folders: every container is an entry (an experiment or a resource).
+# holds_records is True for a records-only entry.
 containers = session.list_containers(where)
 
 # An entry's records are in the entry itself: in its metadata, and shown
@@ -64,11 +66,13 @@ if where != ROOT:
 
 ## Where things go
 
-eLabFTW has no folders, so every container is an entry.
+The first name in a path is a category. eLabFTW has no folders, so every
+container below it is an entry in that category.
 
 | MetaRelay | eLabFTW |
 | --- | --- |
-| A container | An entry titled with the last name in its path, tagged with every prefix of the path (`Study`, `Study/Cohort A`, …) so clicking a tag works like opening a folder |
+| The first name in a path | A category of the API key's team, like a LabArchives notebook. `list_containers(ROOT)` lists them |
+| A container below it | An entry in that category, titled with the last name in its path |
 | `ensure_container(path, holds_records=True)` | A records-only entry, like a LabArchives page: it can't contain containers (`ValidationError`). Listings mark it with `Container.holds_records` |
 | Records in a container | In that container's entry, whether it is records-only or not |
 | One record | In its entry's metadata as JSON (`metadata.metarelay`), in the body as tables, and as eLabFTW fields grouped under `<record_id> · <table>` |
@@ -77,20 +81,36 @@ eLabFTW has no folders, so every container is an entry.
 Two read-only fields on every entry, `MetaRelay path` and `MetaRelay parent`,
 are how MetaRelay finds entries. Don't change them: an entry whose path field
 no longer matches is not found, and `ensure_container` makes a new one.
-eLabFTW tags ignore case and turn `|` into a space, so names containing `|`
-are rejected; names that differ only in case are still separate containers.
+Names that differ only in case are separate containers.
 Two writers creating the same container at once can each make an entry.
 MetaRelay then uses the one that holds records, else the oldest; only two
 entries that both hold records raise `ConflictError` (move the records into
 one). An entry whose `metadata.metarelay` was broken by hand raises
 `ValidationError` naming the entry, instead of being treated as missing.
-Paths longer than 255 characters work, but eLabFTW can't store tags that
-long, so their deepest prefixes get no tag. MetaRelay only looks at entries
-of the API key's team.
+MetaRelay only looks at entries of the API key's team.
 
-MetaRelay doesn't set categories. A lab that wants them (DSST's prototype
-used Behavior, Surgeries, …) can set them in eLabFTW; MetaRelay leaves them
-alone.
+## Categories and tags
+
+A category is the class of a set of experiments. The lab creates
+categories in eLabFTW; MetaRelay never does. `Fiber study/Cohort A/M1` is an
+entry in the `Fiber study` category, and so is every entry MetaRelay creates
+under it. If the team has no category with that title, `ensure_container`
+raises `NotFoundError` naming it. Records go in entries, not in the category
+itself. Moving an entry to another category in eLabFTW is fine: MetaRelay
+still finds it by its path and doesn't move it back.
+
+Tags are the kind of record. `record_tags` maps a schema ID to a tag, and
+each record write adds its schema's tag to the entry:
+
+```python
+config = ElabFTWConfig(token="...", record_tags={"lab.implant": "Surgeries"})
+```
+
+A schema with no tag in the map adds none. MetaRelay never removes a tag, so
+tags a person adds stay. Neither tags nor the category are part of the edit
+check, so changing them is never a conflict. If the team doesn't let users
+create tags, an admin creates each mapped tag first; otherwise the write
+saves the record, then raises `ValidationError`.
 
 ## Edits made in eLabFTW
 
@@ -145,7 +165,9 @@ docker compose exec elabftw bin/init db:populate /seed/populate.yml --yes --fast
 ```
 
 Log in at http://localhost:3148 as `metarelay@example.org` /
-`metarelay-dev-password`, or use the API key `metarelay-dev-key`:
+`metarelay-dev-password`, or use the API key `metarelay-dev-key`. The seed
+also creates the `Fiber study` category the examples write into, and
+`MetaRelay tests` for the tests:
 
 ```python
 config = ElabFTWConfig(token="metarelay-dev-key", api_url="http://localhost:3148/api/v2")

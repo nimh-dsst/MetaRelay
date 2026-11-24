@@ -1,3 +1,4 @@
+import os
 from collections.abc import Iterator
 
 import pydantic
@@ -41,3 +42,12 @@ def make_record():
         return Record(**fields)
 
     return _make
+
+
+@pytest.fixture(scope="session")
+def elabftw_category() -> str:
+    """The category the live eLabFTW tests write into. The dev stack's seed
+    creates it, since MetaRelay never creates categories."""
+    if not os.environ.get("METARELAY_ELABFTW_TEST_API_URL"):
+        pytest.skip("set METARELAY_ELABFTW_TEST_API_URL to run against eLabFTW")
+    return "MetaRelay tests"

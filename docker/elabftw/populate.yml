@@ -10,3 +10,11 @@ teams:
         firstname: Meta
         lastname: Relay
         api_key: metarelay-dev-key
+    # MetaRelay never creates categories. The examples write into
+    # "Fiber study", the tests into "MetaRelay tests".
+    experiments_categories:
+      - name: Fiber study
+      - name: MetaRelay tests
+    resources_categories:
+      - name: Fiber study
+      - name: MetaRelay tests

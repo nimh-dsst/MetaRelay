@@ -111,10 +111,15 @@ class ElabClient:
             api = elabapi_python.ExperimentsApi(self._client)
             self._list, self._get = api.read_experiments, api.get_experiment
             self._post, self._patch = api.post_experiment_with_http_info, api.patch_experiment
+            categories = elabapi_python.ExperimentCategoriesApi(self._client)
+            self._categories = categories.read_team_experiments_categories
         else:
             api = elabapi_python.ItemsApi(self._client)
             self._list, self._get = api.read_items, api.get_item
             self._post, self._patch = api.post_item_with_http_info, api.patch_item
+            categories = elabapi_python.ResourceCategoriesApi(self._client)
+            self._categories = categories.read_team_resources_categories
+        self._tags = elabapi_python.TagsApi(self._client)
         self._uploads = elabapi_python.UploadsApi(self._client)
         self._users = elabapi_python.UsersApi(self._client)
 
@@ -122,6 +127,11 @@ class ElabClient:
         """Fail now, with a clear error, if the key is wrong."""
         with _errors("log in"):
             self._users.read_user("me", _preload_content=False)
+
+    def categories(self) -> list[dict[str, Any]]:
+        """The API key's team's categories for this entity type."""
+        with _errors("list categories"):
+            return json.loads(self._categories("current", _preload_content=False).data)
 
     def search(self, extended: str) -> list[dict[str, Any]]:
         """Every entry matching an extended search query (no ``metadata``)."""
@@ -154,9 +164,14 @@ class ElabClient:
                 raise ValueError("metadata is not an object")
             return entry
 
-    def create(self, title: str, tags: list[str], body: str, metadata: dict[str, Any]) -> int:
+    def create(self, title: str, category: int, body: str, metadata: dict[str, Any]) -> int:
         """Create an entry with everything set in one request."""
-        payload = {"title": title, "tags": tags, "body": body, "metadata": json.dumps(metadata)}
+        payload = {
+            "title": title,
+            "category": category,
+            "body": body,
+            "metadata": json.dumps(metadata),
+        }
         with _errors(f"create entry {title!r}"):
             _, _, headers = self._post(body=payload)
             return _id_from_location(headers)
@@ -165,6 +180,11 @@ class ElabClient:
         """Replace an entry's body and metadata together, in one request."""
         with _errors(f"update entry {entry_id}"):
             self._patch({"body": body, "metadata": json.dumps(metadata)}, entry_id)
+
+    def add_tag(self, entry_id: int, tag: str) -> None:
+        """Tag an entry. eLabFTW ignores a tag the entry already has, in any case."""
+        with _errors(f"tag entry {entry_id}"):
+            self._tags.post_tag(self.entity, entry_id, body={"tag": tag})
 
     def uploads(self, entry_id: int) -> list[dict[str, Any]]:
         """The entry's current (not deleted or archived) uploads."""
