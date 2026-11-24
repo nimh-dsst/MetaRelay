@@ -53,6 +53,11 @@ uv run --group docs sphinx-build -W --keep-going -n -b html docs docs/_build/htm
   | eLabFTW | A real eLabFTW in Docker. Without it, most eLabFTW tests skip | None needed: CI runs the real server |
   | GitHub | The fake GitHub server, in-process | `tests/backends/test_github_live.py` ([GitHub](docs/github.md#testing)) |
 
+  The backends differ on purpose. eLabFTW ships a Docker image, so CI tests
+  the real server. LabArchives can't be self-hosted and GitHub needs a token,
+  so their default tests use fakes, and the live checks before each release
+  keep those fakes honest.
+
 - To run the eLabFTW tests locally, start the server from `compose.yaml`:
 
   ```sh
