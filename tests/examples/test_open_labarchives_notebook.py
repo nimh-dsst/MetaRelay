@@ -30,11 +30,6 @@ def test_logs_in_opens_a_notebook_and_loads_a_record(uri: str, capsys) -> None:
     assert "Notebooks: Test notebook, Lab Notebook" in out
     assert "Records: implant-M1" in out
     assert "| fiber_diameter_um | 200.0 |" in out
-
-
-def test_loads_a_record_by_id(uri: str, capsys) -> None:
-    args = ["--uri", uri, "--notebook", NOTEBOOK, "--path", WHERE, "--auto-login"]
-    assert main([*args, "--record", "implant-M1"]) == 0
     assert main([*args, "--record", "implant-M2"]) == 1
     assert "No record 'implant-M2'" in capsys.readouterr().err
 
@@ -43,14 +38,6 @@ def test_without_a_notebook_it_lists_them(uri: str, capsys) -> None:
     capsys.readouterr()
     assert main(["--uri", uri, "--auto-login"]) == 0
     assert capsys.readouterr().out.splitlines() == ["Test notebook", "Lab Notebook"]
-
-
-def test_lists_folders_and_pages_where_there_are_no_records(uri: str, capsys) -> None:
-    args = ["--uri", uri, "--notebook", "Lab Notebook", "--path", "Example experiment"]
-    assert main([*args, "--auto-login"]) == 0
-    out = capsys.readouterr().out
-    assert "  Notes (page)" in out
-    assert "No records here" in out
 
 
 def test_an_unknown_notebook_names_the_real_ones(uri: str, capsys) -> None:

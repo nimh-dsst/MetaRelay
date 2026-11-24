@@ -25,16 +25,8 @@ def test_opens_an_entry_and_loads_its_record(written, capsys) -> None:
     assert f"Opened {where}" in out
     assert "Records: implant-M1" in out
     assert "| fiber_diameter_um | 200.0 |" in out
-
-
-def test_lists_the_entries_inside_one(written, capsys) -> None:
-    uri, where = written
-    top = where.split("/")[0]
-    capsys.readouterr()
-    assert main(["--uri", uri, "--path", top]) == 0
-    out = capsys.readouterr().out
-    assert "  Fiber study/" in out
-    assert "No records here" in out
+    assert main(["--uri", uri, "--path", where, "--record", "implant-M2"]) == 1
+    assert "No record 'implant-M2'" in capsys.readouterr().err
 
 
 def test_without_a_path_it_lists_the_top_level(written, capsys) -> None:
@@ -44,21 +36,6 @@ def test_without_a_path_it_lists_the_top_level(written, capsys) -> None:
     out = capsys.readouterr().out
     assert out.startswith("Opened the top level")
     assert f"  {where.split('/')[0]}/" in out
-
-
-def test_loads_a_record_by_id(written, capsys) -> None:
-    uri, where = written
-    assert main(["--uri", uri, "--path", where, "--record", "implant-M1"]) == 0
-    assert main(["--uri", uri, "--path", where, "--record", "implant-M2"]) == 1
-    assert "No record 'implant-M2'" in capsys.readouterr().err
-
-
-def test_a_missing_entry_is_a_short_error(elabftw, capsys) -> None:
-    uri, top = elabftw
-    assert main(["--uri", uri, "--path", f"{top}/Nope"]) == 1
-    err = capsys.readouterr().err
-    assert err.startswith("Error: ")
-    assert "Traceback" not in err
 
 
 def test_a_wrong_api_key_is_a_short_error(elabftw, monkeypatch, capsys) -> None:

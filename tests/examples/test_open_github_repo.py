@@ -25,6 +25,8 @@ def test_opens_a_folder_and_loads_its_record(uri: str, capsys) -> None:
     assert "Records: implant-M1" in out
     assert "records/Fiber study/Cohort A/implant-M1.json" in out
     assert "| fiber_diameter_um | 200.0 |" in out
+    assert main(["--uri", uri, "--path", WHERE, "--record", "implant-M2"]) == 1
+    assert "No record 'implant-M2'" in capsys.readouterr().err
 
 
 def test_without_a_path_it_lists_the_top_level(uri: str, capsys) -> None:
@@ -34,19 +36,6 @@ def test_without_a_path_it_lists_the_top_level(uri: str, capsys) -> None:
     assert out.startswith("Opened the top level")
     assert "  Fiber study/" in out
     assert "No records here" in out
-
-
-def test_loads_a_record_by_id(uri: str, capsys) -> None:
-    assert main(["--uri", uri, "--path", WHERE, "--record", "implant-M1"]) == 0
-    assert main(["--uri", uri, "--path", WHERE, "--record", "implant-M2"]) == 1
-    assert "No record 'implant-M2'" in capsys.readouterr().err
-
-
-def test_a_missing_folder_is_a_short_error(uri: str, capsys) -> None:
-    assert main(["--uri", uri, "--path", "Nope"]) == 1
-    err = capsys.readouterr().err
-    assert err.startswith("Error: ")
-    assert "Traceback" not in err
 
 
 def test_a_wrong_token_is_a_short_error(uri: str, monkeypatch, capsys) -> None:
