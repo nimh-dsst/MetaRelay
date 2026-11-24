@@ -38,4 +38,5 @@ contributing
 architecture
 IMPLEMENTATION_PLAN
 adr/0001-elabftw-record-storage
+adr/0003-credentials-from-env-files
 ```

@@ -9,6 +9,7 @@ runs without an account, and CI runs each one end to end.
 | [`open_labarchives_notebook`](../examples/open_labarchives_notebook/README.md) | Log in to LabArchives, list notebooks, open one, and load a record | `metarelay[labarchives]`, and the fake server from `docker compose up` |
 | [`open_elabftw_experiment`](../examples/open_elabftw_experiment/README.md) | Connect to eLabFTW with an API key, list entries, open one, and load a record | `metarelay[elabftw]`, and eLabFTW from `docker compose up elabftw` |
 | [`open_github_repo`](../examples/open_github_repo/README.md) | Connect to GitHub with a token, list folders, open one, and load a record | `metarelay[github]`, and the fake from `python -m metarelay.testing.github_fake` |
+| [`credentials_env_file`](../examples/credentials_env_file.py) | Read a token from a `.env` file with `_env_file=` | `metarelay[github]`. It serves its own fake GitHub |
 
 Run them from the repository root as modules, after `uv sync` (add
 `--extra labarchives` for LabArchives, `--extra elabftw` for eLabFTW,

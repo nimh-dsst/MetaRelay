@@ -164,6 +164,16 @@ def test_missing_credentials_are_a_configuration_error(monkeypatch) -> None:
         begin_login("labarchives://api.labarchives.com", CALLBACK)
 
 
+def test_labapi_variable_names_get_a_hint_without_their_value(monkeypatch) -> None:
+    monkeypatch.delenv("METARELAY_LABARCHIVES_AKID", raising=False)
+    monkeypatch.setenv("ACCESS_KEYID", "old-akid-value")
+    with pytest.raises(ConfigurationError) as caught:
+        LabArchivesConfig()
+    message = str(caught.value)
+    assert "METARELAY_LABARCHIVES_AKID and METARELAY_LABARCHIVES_AKPASS" in message
+    assert "old-akid-value" not in message
+
+
 def test_akpass_is_never_printed() -> None:
     config = LabArchivesConfig(akid=AKID, akpass="very-secret")
     assert "very-secret" not in repr(config)

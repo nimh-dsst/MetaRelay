@@ -5,12 +5,14 @@ caller builds a config object and passes it to ``connect()``.
 
 Config objects are ``pydantic-settings`` models. A config reads environment
 variables only if it declares its own ``env_prefix``, so a token is only ever
-read from a variable named for its service::
+read from a variable named for its service. It reads a ``.env`` file only when
+the caller names one with ``_env_file=``::
 
     class GitHubConfig(TokenConfig):
         model_config = SettingsConfigDict(env_prefix="METARELAY_GITHUB_")
 
     GitHubConfig()                 # reads METARELAY_GITHUB_TOKEN
+    GitHubConfig(_env_file=".env") # ...or from that file, if not in the environment
     TokenConfig(token="...")       # the generic class: explicit values only
 
 There is deliberately no shared ``METARELAY_TOKEN``: a GitHub token in that
@@ -43,7 +45,9 @@ __all__ = ["DestinationConfig", "TokenConfig"]
 class DestinationConfig(BaseSettings):
     """Base class for every backend's config."""
 
-    model_config = SettingsConfigDict(extra="forbid", frozen=True)
+    # A .env file named with _env_file= may hold other apps' variables: read
+    # only those with this config's prefix.
+    model_config = SettingsConfigDict(extra="forbid", frozen=True, dotenv_filtering="match_prefix")
 
     def __init__(self, **values: Any) -> None:
         try:

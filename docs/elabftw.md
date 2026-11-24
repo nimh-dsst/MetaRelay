@@ -22,8 +22,27 @@ session = connect("elabftw://elab.example.org/experiments", ElabFTWConfig(token=
 
 The URI's path picks the kind of entry: `/experiments` or `/resources`.
 Requests go to `https://<host>/api/v2`; set `api_url` for anything else.
-`ElabFTWConfig` also reads `METARELAY_ELABFTW_TOKEN`,
-`METARELAY_ELABFTW_API_URL`, and `METARELAY_ELABFTW_VERIFY_TLS`.
+
+### Credentials
+
+`ElabFTWConfig()` reads `METARELAY_ELABFTW_TOKEN`, `METARELAY_ELABFTW_API_URL`,
+and `METARELAY_ELABFTW_VERIFY_TLS` for anything not passed:
+
+```sh
+# .env
+METARELAY_ELABFTW_TOKEN=...
+```
+
+MetaRelay never looks for a `.env` file on its own. Name it with
+`_env_file=`, a supported argument despite the underscore (it comes from
+`pydantic-settings`):
+
+```python
+config = ElabFTWConfig(_env_file=".env")
+```
+
+Variables already set in the environment win over the file. Add `.env` to
+your `.gitignore` so the key is never committed.
 
 ## Opening an entry
 
