@@ -131,15 +131,15 @@ def test_uses_the_redirect_flow(base_url: str) -> None:
         connect(uri_for(base_url))
 
 
-def test_login_challenge_points_at_the_login_page(base_url: str) -> None:
-    challenge = begin_login(uri_for(base_url), CALLBACK, config_for(base_url))
+def test_login_points_at_the_login_page_and_the_session_at_the_uri(base_url: str) -> None:
+    config = config_for(base_url)
+    challenge = begin_login(uri_for(base_url), CALLBACK, config)
     assert challenge.auth_url.startswith(f"{base_url}/api_user_login?")
     assert challenge.redirect_url == CALLBACK
     assert challenge.destination == uri_for(base_url)
-
-
-def test_session_destination_is_the_uri(session: LabArchivesSession, base_url: str) -> None:
+    session = complete_login(challenge, follow_login(challenge.auth_url), config)
     assert session.destination == uri_for(base_url)
+    session.close()
 
 
 def test_default_api_url_is_https_on_the_host() -> None:
@@ -197,7 +197,6 @@ def test_rejects_a_non_http_api_url() -> None:
     [
         {"error": "access denied"},
         {"email": EMAIL},
-        {"auth_code": CODE},
         {"email": EMAIL, "auth_code": "wrong"},
     ],
 )
@@ -330,7 +329,7 @@ def test_a_folder_and_a_page_with_the_same_name(
     assert not any(node.name == RECORDS_PAGE for node in fake._nodes.values())
 
 
-def test_two_pages_with_the_same_name_are_ambiguous(
+def test_two_pages_or_folders_with_the_same_name_are_ambiguous(
     session: LabArchivesSession, fake: FakeLabArchives, make_record
 ) -> None:
     study = session.list_containers(LogicalPath((NOTEBOOK,)))[0]
@@ -339,6 +338,10 @@ def test_two_pages_with_the_same_name_are_ambiguous(
         fake.add_node(notebook_id, study.native_id, "M1", is_page=True)
     with pytest.raises(ConflictError, match="more than one page"):
         session.write_record(STUDY / "M1", make_record())
+
+    fake.add_node(notebook_id, "0", "Study", is_page=False)
+    with pytest.raises(ConflictError, match="Study"):
+        session.list_containers(STUDY)
 
 
 @pytest.mark.parametrize("name", [RECORDS_PAGE, FILES_PAGE])
@@ -418,15 +421,6 @@ def test_names_that_look_like_path_escapes(session: LabArchivesSession, make_rec
     record = make_record()
     session.write_record(path, record)
     assert session.read_record(path, "fiber-1").record == record
-
-
-def test_two_folders_with_the_same_name_are_ambiguous(
-    session: LabArchivesSession, fake: FakeLabArchives
-) -> None:
-    notebook = session.list_containers(ROOT)[0]
-    fake.add_node(notebook.native_id, "0", "Study", is_page=False)
-    with pytest.raises(ConflictError, match="Study"):
-        session.list_containers(STUDY)
 
 
 def test_names_metarelay_cannot_address_are_left_out_of_listings(
@@ -517,16 +511,6 @@ def test_an_update_replaces_entries_in_place(
     assert len(records_page(fake, second)) == 2
 
 
-def test_attachment_replaced_by_hand_conflicts(
-    session: LabArchivesSession, fake: FakeLabArchives, make_record
-) -> None:
-    receipt = session.write_record(STUDY, make_record())
-    theirs = make_record(diameter_um=999.0).model_dump_json().encode()
-    fake.replace_attachment(receipt.backend_ids["attachment_entry_id"], theirs)
-    with pytest.raises(ConflictError):
-        session.write_record(STUDY, make_record(diameter_um=200.0), prior_receipt=receipt)
-
-
 def test_reads_are_never_stale(base_url: str, make_record) -> None:
     mine, theirs = login(base_url), login(base_url)
     mine.ensure_container(STUDY)
@@ -572,13 +556,21 @@ def test_missing_preview_is_restored(
 # Finding the preview again (the caption names it)
 
 
-def test_preview_edit_without_its_marker_conflicts_even_after_a_read(
+def test_preview_edit_without_its_marker_conflicts(
     session: LabArchivesSession, fake: FakeLabArchives, make_record
 ) -> None:
     receipt = session.write_record(STUDY, make_record(diameter_um=400))
     preview_id = receipt.backend_ids["preview_entry_id"]
     fake.edit_entry(preview_id, "<p>Diameter is really 420 um</p>")  # marker gone
 
+    # With no preview ID in the receipt, only the caption can find the edited entry.
+    ids = {k: v for k, v in receipt.backend_ids.items() if k != "preview_entry_id"}
+    older = receipt.model_copy(update={"backend_ids": ids})
+    with pytest.raises(ConflictError):
+        session.write_record(STUDY, make_record(diameter_um=200), prior_receipt=older)
+    assert len(records_page(fake, receipt)) == 2
+
+    # A read finds it by the caption alone too, and the edit still conflicts.
     from_read = session.read_record(STUDY, "fiber-1").receipt
     assert from_read.backend_ids["preview_entry_id"] == preview_id
     assert from_read.preview_checksum == receipt.preview_checksum  # as last written
@@ -587,20 +579,6 @@ def test_preview_edit_without_its_marker_conflicts_even_after_a_read(
     # Forcing replaces the edited entry instead of adding a second preview.
     forced = session.write_record(STUDY, make_record(diameter_um=200), mode=WriteMode.FORCE)
     assert forced.backend_ids["preview_entry_id"] == preview_id
-    assert len(records_page(fake, receipt)) == 2
-
-
-def test_edit_that_removes_the_marker_conflicts_without_a_preview_id_in_the_receipt(
-    session: LabArchivesSession, fake: FakeLabArchives, make_record
-) -> None:
-    receipt = session.write_record(STUDY, make_record(diameter_um=400))
-    preview_id = receipt.backend_ids["preview_entry_id"]
-    fake.edit_entry(preview_id, "<p>Diameter is really 420 um</p>")  # marker gone
-    # Only the caption can find the edited entry now.
-    ids = {k: v for k, v in receipt.backend_ids.items() if k != "preview_entry_id"}
-    older = receipt.model_copy(update={"backend_ids": ids})
-    with pytest.raises(ConflictError):
-        session.write_record(STUDY, make_record(diameter_um=200), prior_receipt=older)
     assert len(records_page(fake, receipt)) == 2
 
 

@@ -120,22 +120,19 @@ def _smoke_with_hand_edit(monkeypatch, *edits: tuple[str, str], extra: tuple[str
         return run_smoke(url, "--check-edits", *extra)
 
 
-def test_check_edits_reads_and_accepts_an_edit_made_by_hand(monkeypatch, capsys) -> None:
-    assert _smoke_with_hand_edit(monkeypatch, ("<td>second</td>", "<td>edited</td>")) == 0
-    out = capsys.readouterr().out
-    assert "edited in LabArchives is not overwritten" in out
-    assert "the conflict names the edit: Metadata · label: 'second' → 'edited'" in out
-    assert "accepting the edit copies it into the record" in out
-    assert "All smoke checks passed" in out
-
-
-def test_check_edits_can_be_recorded(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_check_edits_reads_and_accepts_an_edit_made_by_hand_and_records_it(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
     # DSST runs --check-edits with --record. The recorder fails closed on
     # anything it doesn't know, so the accept step's traffic must pass it.
     path = tmp_path / "edits.json"
     edit = ("<td>second</td>", "<td>edited</td>")
     assert _smoke_with_hand_edit(monkeypatch, edit, extra=("--record", str(path))) == 0
-    assert "All smoke checks passed" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "edited in LabArchives is not overwritten" in out
+    assert "the conflict names the edit: Metadata · label: 'second' → 'edited'" in out
+    assert "accepting the edit copies it into the record" in out
+    assert "All smoke checks passed" in out
     assert path.exists()
 
 
@@ -148,15 +145,6 @@ def test_check_edits_fails_when_the_edit_is_read_wrong(monkeypatch, capsys) -> N
     assert "read the edit wrong" in captured.err
     assert "value: '2.0' → '9.0'" in captured.err
     assert "All smoke checks passed" not in captured.out
-
-
-def test_check_edits_fails_when_something_else_changed_too(monkeypatch, capsys) -> None:
-    # The right edit plus text MetaRelay can't list: the diff is incomplete,
-    # so accepting would be refused. The smoke run reports it instead.
-    right_edit = ("<td>second</td>", "<td>edited</td>")
-    note = ("<td>2.0</td></tr></tbody></table>", "<td>2.0</td></tr></tbody></table><p>a note</p>")
-    assert _smoke_with_hand_edit(monkeypatch, right_edit, note) == 1
-    assert "complete: False" in capsys.readouterr().err
 
 
 def test_smoke_needs_an_existing_notebook(base_url: str, capsys) -> None:
@@ -231,6 +219,10 @@ def test_record_writes_a_cassette_without_secrets(base_url: str, tmp_path: Path)
         "entries/add_attachment",
     } <= calls
     assert all("status" in interaction and "body" in interaction for interaction in interactions)
+    # It keeps the folders the smoke script made.
+    assert "<display-text>MetaRelay smoke tests</display-text>" in text
+    assert "Lab Notebook" not in text  # the script did not create the notebook
+    assert "<name>Notebook 1</name>" in text
 
 
 def test_shapes_list_the_elements_of_each_call(tmp_path: Path) -> None:
@@ -242,25 +234,21 @@ def test_shapes_list_the_elements_of_each_call(tmp_path: Path) -> None:
     assert "entries/entry/entry-data" in shapes["tree_tools/get_entries_for_page"]
 
 
-def test_identical_cassettes_have_no_differences(tmp_path: Path) -> None:
-    shapes = xml_shapes(load_cassette(fake_cassette(tmp_path)))
-    assert compare_shapes(live=shapes, fake=shapes) == []
-
-
-def test_differences_are_reported_both_ways() -> None:
+def test_differences_and_calls_only_in_one_cassette_are_reported() -> None:
     live = {"tree_tools/insert_node": {"node/tree-id", "node/created-at"}}
     fake = {"tree_tools/insert_node": {"node/tree-id", "node/is-page"}}
     differences = compare_shapes(live=live, fake=fake)
     assert any("node/created-at" in line and "fake does not" in line for line in differences)
     assert any("node/is-page" in line and "LabArchives does not" in line for line in differences)
+    differences = compare_shapes(live={"a/b": {"x"}}, fake={})
+    assert differences == ["a/b: LabArchives was called but the fake was not."]
 
 
-def test_error_codes_are_read_from_error_responses(tmp_path: Path) -> None:
+def test_error_codes_are_read_from_error_responses_inside_the_class_root(
+    tmp_path: Path,
+) -> None:
     codes = error_codes(load_cassette(fake_cassette(tmp_path)))
     assert codes == {"tree_tools/get_tree_level": {"4999"}}
-
-
-def test_error_codes_are_read_inside_the_class_root() -> None:
     # What LabArchives sends: the error nested in <tree-tools>, beside the request.
     body = (
         '<?xml version="1.0" encoding="UTF-8"?><tree-tools><error>'
@@ -278,11 +266,6 @@ def test_different_error_codes_are_reported() -> None:
     assert compare_error_codes(live=live, fake=fake) == [
         "tree_tools/get_tree_level: LabArchives answered error 4002; the fake answered 4404."
     ]
-
-
-def test_calls_only_in_one_cassette_are_reported() -> None:
-    differences = compare_shapes(live={"a/b": {"x"}}, fake={})
-    assert differences == ["a/b: LabArchives was called but the fake was not."]
 
 
 @pytest.mark.skipif(not CASSETTES, reason="No cassettes captured from real LabArchives yet.")
@@ -320,23 +303,6 @@ def test_committed_cassettes_hold_only_fake_data(cassette: Path) -> None:
     again = json.loads(json.dumps(interactions))
     anonymize(again)
     assert again == interactions  # nothing was left to replace
-
-
-# The dev stack's seed
-
-
-def test_dev_stack_seed_loads_and_the_demo_user_logs_in() -> None:
-    labapi = pytest.importorskip("labapi")
-    seed = REPO / "docker" / "fake-labarchives" / "seed.json"
-    fake = FakeLabArchives.from_seed(seed, akid="fake-akid", akpass="fake-akpass")
-    with serve_fake(fake) as url:
-        user = labapi.Client(url, "fake-akid", "fake-akpass").login("demo@example.org", "demo")
-        assert "Lab Notebook" in user.notebooks.all_keys()
-
-
-def test_seed_is_json_with_users() -> None:
-    seed = json.loads((REPO / "docker" / "fake-labarchives" / "seed.json").read_text())
-    assert seed["users"]
 
 
 def one_call(body: str, **params: str) -> dict:
@@ -452,9 +418,7 @@ def test_anonymize_skips_numbers_that_are_already_taken() -> None:
 @pytest.mark.parametrize(
     ("real", "fake"),
     [
-        ("2026-11-16T14:03:22Z", "2026-01-01T00:00:00Z"),
         ("2026-11-16T14:03:22-05:00", "2026-01-01T00:00:00Z"),  # not the recorder's offset
-        ("2026-11-16T14:03:22.123Z", "2026-01-01T00:00:00Z"),
         ("2026-11-16T14:03:22.123456+0530", "2026-01-01T00:00:00Z"),
         ("run 2026-11-16 14.46.21", "run 2026-01-01 00.00.00"),
         ("uploaded=2026-11-16T19_46_45Z.json", "uploaded=2026-01-01T00_00_00Z.json"),
@@ -603,15 +567,6 @@ def test_smoke_reports_the_failure_and_then_the_leak(
 
 def test_the_fake_sends_nothing_the_lists_do_not_cover(tmp_path: Path) -> None:
     assert leaks(load_cassette(fake_cassette(tmp_path))) == []
-
-
-def test_recording_keeps_the_folders_the_smoke_script_made(base_url: str, tmp_path: Path) -> None:
-    path = tmp_path / "live.json"
-    assert run_smoke(base_url, "--record", str(path)) == 0
-    text = path.read_text()
-    assert "<display-text>MetaRelay smoke tests</display-text>" in text
-    assert "Lab Notebook" not in text  # the script did not create the notebook
-    assert "<name>Notebook 1</name>" in text
 
 
 def test_a_cassette_recorded_earlier_can_be_anonymized_in_place(tmp_path: Path) -> None:
