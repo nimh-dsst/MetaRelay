@@ -12,13 +12,13 @@ D7, ...) are in [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 | Path | Holds |
 | --- | --- |
 | `src/metarelay/core/` | The backend-neutral public API: records, schemas, sessions, receipts, conflicts, previews, errors. Imports no backend |
-| `src/metarelay/backends/` | One module per backend: `local.py` (`file://`), `labarchives.py` (`labarchives://`) |
-| `src/metarelay/testing/` | `MemorySession`, the conformance suite, and the fake LabArchives server with its smoke and cassette tools |
+| `src/metarelay/backends/` | One module per backend: `local.py` (`file://`), `labarchives.py` (`labarchives://`), `elabftw.py` (`elabftw://`), `github.py` (`github://`) |
+| `src/metarelay/testing/` | `MemorySession`, the conformance suite, the fake GitHub server, and the fake LabArchives server with its smoke and cassette tools |
 | `src/metarelay/cli.py` | The `metarelay` command |
 | `tests/` | One folder per package folder, plus `tests/examples/` for the examples |
 | `examples/` | Runnable examples. Indexed in [`docs/examples.md`](docs/examples.md) |
 | `docs/` | User and developer docs, and the Sphinx site (`conf.py`, `index.md`) |
-| `docker/`, `compose.yaml` | The dev stack: the fake LabArchives server |
+| `docker/`, `compose.yaml` | The dev stack: the fake LabArchives server and a real eLabFTW |
 
 ## Commands
 
@@ -29,7 +29,7 @@ uv run ruff format --check .  # formatting
 uv run pytest                 # tests, examples, and the docs drift check
 uv build                      # sdist and wheel
 uv run --group docs sphinx-build -W --keep-going -n -b html docs docs/_build/html  # docs site
-docker compose up -d          # the fake LabArchives server on port 8080
+docker compose up -d          # fake LabArchives on 8080, eLabFTW on 3148 (seed it: see CONTRIBUTING.md)
 ```
 
 CI runs the same checks on Python 3.12, 3.13, and 3.14, once with the base
@@ -58,9 +58,10 @@ install and once with all extras. `uv run ruff format .` and
   error. Use `raise ... from None`.
 - **Never store credentials.** Callers pass config objects. MetaRelay never
   saves them, and destination URIs can't hold a username or password.
-- **Never call a real ELN from the test suite.** Use `MemorySession`, the
-  fake LabArchives server, or recorded cassettes. Live smoke tests are
-  opt-in.
+- **Never call real LabArchives or GitHub from the default test run.** Use
+  `MemorySession`, the fake servers, or recorded cassettes. eLabFTW tests run
+  against the real eLabFTW from `compose.yaml` and skip without it. Live
+  checks are opt-in; see the Tests section of `CONTRIBUTING.md`.
 - **Every bug fix and new behavior gets a test.** A new backend must pass
   `metarelay.testing.BackendConformance`.
 - **Docs code comes from the examples.** Code between `# [docs:<name>]` and
