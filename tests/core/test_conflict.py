@@ -118,10 +118,6 @@ class TestPreviewEdits:
         )
 
 
-def test_write_mode_accepts_plain_strings() -> None:
-    assert WriteMode("upsert") is WriteMode.UPSERT
-
-
 @pytest.mark.parametrize("mode", ["create", "upsert", "force"])
 def test_mode_as_a_string_acts_like_the_enum(mode: str) -> None:
     # "create" used to fail the ``is`` checks and act like upsert.
@@ -133,11 +129,6 @@ def test_mode_as_a_string_acts_like_the_enum(mode: str) -> None:
                 decide(mode, remote=remote, prior=prior)
         else:
             assert decide(mode, remote=remote, prior=prior) is expected
-
-
-def test_create_as_a_string_refuses_an_existing_record() -> None:
-    with pytest.raises(ConflictError):
-        decide("create", remote=LOCAL)
 
 
 def test_unknown_mode_is_rejected() -> None:

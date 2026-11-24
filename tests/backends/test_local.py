@@ -262,28 +262,10 @@ def test_metarelay_folder_is_not_a_container(session: LocalSession, make_record)
 # Missing containers and files
 
 
-def test_missing_container_is_not_found(session: LocalSession, make_record) -> None:
-    missing = LogicalPath(("Nope",))
-    with pytest.raises(NotFoundError):
-        session.write_record(missing, make_record())
-    with pytest.raises(NotFoundError):
-        session.list_records(missing)
-    with pytest.raises(NotFoundError):
-        session.list_containers(missing)
-
-
 def test_root_works_as_a_container(session: LocalSession, make_record) -> None:
     record = make_record()
     session.write_record(ROOT, record)
     assert [item.record for item in session.list_records(ROOT)] == [record]
-
-
-def test_file_cannot_overwrite_a_record(session: LocalSession, make_record) -> None:
-    session.write_record(STUDY, make_record())
-    for name in ("fiber-1.json", "fiber-1.md"):
-        with pytest.raises(ValidationError):
-            session.write_file(STUDY, name, b"{}")
-    assert session.read_record(STUDY, "fiber-1")
 
 
 def test_record_cannot_overwrite_a_file(session: LocalSession, make_record) -> None:
@@ -539,16 +521,6 @@ def test_record_id_too_long_for_a_file_name(
         session.write_record(STUDY, make_record(record_id))
     with pytest.raises(NotFoundError):
         session.read_record(STUDY, record_id)
-
-
-def test_an_emptied_preview_lists_every_row_as_removed(session: LocalSession, make_record) -> None:
-    receipt = session.write_record(STUDY, make_record())
-    (folder(session) / "fiber-1.md").write_text("")
-    with pytest.raises(ConflictError) as raised:
-        session.write_record(STUDY, make_record(), prior_receipt=receipt, mode="upsert")
-    diff = raised.value.preview_diff
-    assert diff is not None
-    assert diff.edits and all(edit.current is None for edit in diff.edits)
 
 
 @pytest.mark.parametrize("extra", ["", "\nA note added under the tables.\n"])

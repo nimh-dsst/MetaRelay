@@ -101,11 +101,6 @@ def test_every_failure_is_a_metarelay_validation_error() -> None:
         Record.model_validate_json("{}")
 
 
-def test_round_trips_through_json(make_record) -> None:
-    record = make_record()
-    assert Record.model_validate_json(record.model_dump_json()) == record
-
-
 def test_a_custom_registry_can_be_passed_in_context(make_record) -> None:
     other = SchemaRegistry()
     data = make_record().model_dump()

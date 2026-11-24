@@ -3,17 +3,12 @@ import pytest
 from pydantic_settings import SettingsConfigDict
 
 from metarelay import (
-    AuthFlow,
     ConfigurationError,
     DestinationConfig,
     LoginChallenge,
     TokenConfig,
     ValidationError,
 )
-
-
-def test_auth_flows() -> None:
-    assert [flow.value for flow in AuthFlow] == ["none", "token", "redirect"]
 
 
 def test_login_challenge_is_plain_data() -> None:

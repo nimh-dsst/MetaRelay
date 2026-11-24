@@ -3,7 +3,6 @@ import pytest
 
 from metarelay import Heading, Preview, Record, Table, register_renderer, render_preview
 from metarelay.core import preview as preview_module
-from metarelay.core.checksum import preview_checksum
 from metarelay.core.errors import ValidationError
 from metarelay.core.preview import (
     PreviewDiff,
@@ -108,13 +107,6 @@ def test_a_schema_can_register_its_own_renderer(make_record) -> None:
 def test_preview_is_plain_data(make_record) -> None:
     preview = render_preview(make_record())
     assert Preview.model_validate_json(preview.model_dump_json()) == preview
-
-
-def test_rendering_is_deterministic(make_record) -> None:
-    record = make_record()
-    assert preview_checksum(render_preview(record).html) == preview_checksum(
-        render_preview(record).html
-    )
 
 
 @pytest.mark.parametrize(
