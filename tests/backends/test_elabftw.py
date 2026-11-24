@@ -22,20 +22,26 @@ from urllib.parse import urlsplit
 
 import pydantic
 import pytest
+import urllib3
 
 pytest.importorskip("elabapi_python")
 
+from elabapi_python.rest import ApiException
+
 from metarelay import connect
 from metarelay.backends import elabftw as backend
+from metarelay.backends import elabftw_client
 from metarelay.core import preview
 from metarelay.core.auth import AuthFlow
 from metarelay.core.backend import auth_flow
 from metarelay.core.conflict import WriteMode, accept_edits
 from metarelay.core.errors import (
     AuthenticationError,
+    BackendUnavailableError,
     ConfigurationError,
     ConflictError,
     NotFoundError,
+    PermissionDeniedError,
     ValidationError,
 )
 from metarelay.core.path import LogicalPath
@@ -112,6 +118,73 @@ class TestElabFTWExperiments(BackendConformance):
 @live
 class TestElabFTWResources(TestElabFTWExperiments):
     kind = "resources"
+
+
+# Errors. A real server can't be made to fail on demand, so these drive the
+# adapter's error translation directly.
+
+
+def api_error(status: int, body: bytes | None = None) -> ApiException:
+    error = ApiException(status=status, reason="nope")
+    error.body = body
+    return error
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (400, ValidationError),
+        (401, AuthenticationError),
+        (403, PermissionDeniedError),
+        (404, NotFoundError),
+        (500, BackendUnavailableError),
+        (503, BackendUnavailableError),
+    ],
+)
+def test_http_errors_become_metarelay_errors(status: int, expected: type[Exception]) -> None:
+    body = json.dumps({"message": "Forbidden", "description": "not your entry"}).encode()
+    with pytest.raises(expected) as raised, elabftw_client._errors("read the entry"):
+        raise api_error(status, body)
+    assert str(raised.value) == (
+        f"eLabFTW could not read the entry (HTTP {status}): Forbidden not your entry"
+    )
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+
+
+@pytest.mark.parametrize("body", [None, b"<html>Bad gateway</html>", b"[1, 2]"])
+def test_an_error_body_that_is_not_elabftw_json_is_left_out(body: bytes | None) -> None:
+    with pytest.raises(BackendUnavailableError) as raised, elabftw_client._errors("search"):
+        raise api_error(502, body)
+    assert str(raised.value) == "eLabFTW could not search (HTTP 502)"
+
+
+def test_a_network_error_is_unavailable_and_not_chained() -> None:
+    # urllib3 errors can carry the request, and the request carries the API key.
+    with pytest.raises(BackendUnavailableError) as raised, elabftw_client._errors("log in"):
+        raise urllib3.exceptions.MaxRetryError(None, f"/api/v2?key={TOKEN}")
+    assert str(raised.value) == "Could not reach eLabFTW to log in (MaxRetryError)."
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+
+
+def test_a_response_it_cannot_parse_is_unavailable() -> None:
+    with (
+        pytest.raises(BackendUnavailableError, match="did not understand"),
+        elabftw_client._errors("create an entry"),
+    ):
+        raise ValueError("no Location header")
+
+
+def test_an_unreachable_server_is_unavailable() -> None:
+    # Nothing listens on port 9 (discard) here; the client must not hang or leak.
+    client = elabftw_client.ElabClient(
+        "http://127.0.0.1:9/api/v2", "secret-key", entity="experiments", verify_tls=True
+    )
+    client._client.configuration.retries = 0
+    with pytest.raises(BackendUnavailableError, match="Could not reach eLabFTW") as raised:
+        client.check_login()
+    assert "secret-key" not in str(raised.value)
 
 
 # Connecting
