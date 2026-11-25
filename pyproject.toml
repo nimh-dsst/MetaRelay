@@ -58,6 +58,7 @@ Issues = "https://github.com/nimh-dsst/MetaRelay/issues"
 dev = [
     "packaging>=25",
     "pytest>=9.0.3",
+    "pytest-cov>=6",
     "ruff>=0.15.12",
 ]
 docs = [
@@ -91,6 +92,17 @@ testpaths = ["tests"]
 pythonpath = ["."]
 addopts = ["--strict-markers", "--strict-config", "-ra"]
 xfail_strict = true
+
+[tool.coverage.run]
+branch = true
+source = ["metarelay"]
+# The fakes and the conformance suite are test tools, not shipped behavior.
+omit = ["*/metarelay/testing/*"]
+
+[tool.coverage.report]
+# CI's all-extras run has no eLabFTW server, so most of the eLabFTW backend is
+# covered only by the separate eLabFTW job. Raise this as coverage grows.
+fail_under = 87
 
 [tool.ruff]
 line-length = 100
