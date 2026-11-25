@@ -92,6 +92,31 @@ def test_explicit_value_wins_over_the_environment(monkeypatch: pytest.MonkeyPatc
     assert GitHubConfig(token="explicit").token.get_secret_value() == "explicit"
 
 
+@pytest.mark.parametrize(
+    ("backend", "config_name", "values"),
+    [
+        ("elabftw", "ElabFTWConfig", {"token": "elab-key"}),
+        ("github", "GitHubConfig", {"token": "github-token"}),
+        ("labarchives", "LabArchivesConfig", {"akid": "akid-1", "akpass": "akpass-1"}),
+    ],
+)
+def test_a_backend_config_reads_a_dotenv_file_only_when_named(
+    backend: str, config_name: str, values: dict[str, str], tmp_path, monkeypatch
+) -> None:
+    config_class = getattr(pytest.importorskip(f"metarelay.backends.{backend}"), config_name)
+    prefix = config_class.model_config["env_prefix"]
+    names = [prefix + field.upper() for field in values]
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    lines = [f"{name}={value}\n" for name, value in zip(names, values.values(), strict=True)]
+    (tmp_path / ".env").write_text("".join(lines) + "OTHER_APP_SETTING=1\n")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigurationError):
+        config_class()
+    assert config_class(_env_file=".env") == config_class(**values)
+
+
 def test_configs_reject_unknown_fields() -> None:
     with pytest.raises(ConfigurationError):
         TokenConfig(token="x", tokn="typo")

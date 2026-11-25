@@ -37,8 +37,36 @@ from metarelay.backends.labarchives import LabArchivesConfig
 config = LabArchivesConfig(akid="...", akpass="...")
 ```
 
-Pass `None` instead to read `METARELAY_LABARCHIVES_AKID`,
-`METARELAY_LABARCHIVES_AKPASS`, and `METARELAY_LABARCHIVES_API_URL`.
+### Credentials
+
+`LabArchivesConfig()`, or `None` in place of a config, reads
+`METARELAY_LABARCHIVES_AKID`, `METARELAY_LABARCHIVES_AKPASS`, and
+`METARELAY_LABARCHIVES_API_URL` for anything not passed:
+
+```sh
+# .env
+METARELAY_LABARCHIVES_AKID=...
+METARELAY_LABARCHIVES_AKPASS=...
+```
+
+MetaRelay never looks for a `.env` file on its own. Name it with
+`_env_file=`, a supported argument despite the underscore (it comes from
+`pydantic-settings`):
+
+```python
+config = LabArchivesConfig(_env_file=".env")
+```
+
+Variables already set in the environment win over the file. Add `.env` to
+your `.gitignore` so the key pair is never committed.
+
+**Moving from `labapi`'s `.env` (ChronoXIV).** `labapi.Client()` loads `.env`
+by itself and reads `ACCESS_KEYID`, `ACCESS_PWD`, and `API_URL`. MetaRelay
+doesn't accept those names, since they are too generic to be sure they mean
+LabArchives. Rename them to `METARELAY_LABARCHIVES_AKID`,
+`METARELAY_LABARCHIVES_AKPASS`, and `METARELAY_LABARCHIVES_API_URL`, and pass
+the file with `_env_file=`. If `ACCESS_KEYID` is set and the new key isn't,
+the `ConfigurationError` names the new variables.
 
 ## Opening a notebook
 

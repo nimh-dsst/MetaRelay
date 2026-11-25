@@ -68,6 +68,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import mimetypes
+import os
 import unicodedata
 from collections.abc import Iterator, Mapping
 from io import BytesIO
@@ -77,7 +78,8 @@ from urllib.parse import urlsplit
 import labapi
 import requests
 from lxml.etree import XMLSyntaxError
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 from pydantic_settings import SettingsConfigDict
 
 from metarelay.core.auth import AuthFlow, LoginChallenge
@@ -166,6 +168,18 @@ class LabArchivesConfig(DestinationConfig):
         if parts.scheme not in {"http", "https"} or not parts.netloc:
             raise ValueError("api_url must be an http:// or https:// URL with a host")
         return value.rstrip("/")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hint_at_labapi_names(cls, values: Any) -> Any:
+        # labapi read ACCESS_KEYID. Name the new variables, never the value.
+        if isinstance(values, dict) and "akid" not in values and os.environ.get("ACCESS_KEYID"):
+            raise PydanticCustomError(
+                "labapi_names",
+                "missing akid. ACCESS_KEYID is labapi's name: set "
+                "METARELAY_LABARCHIVES_AKID and METARELAY_LABARCHIVES_AKPASS instead",
+            )
+        return values
 
 
 def _config(config: DestinationConfig | None) -> LabArchivesConfig:
