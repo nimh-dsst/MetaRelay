@@ -110,7 +110,8 @@ A schema with no tag in the map adds none. MetaRelay never removes a tag, so
 tags a person adds stay. Neither tags nor the category are part of the edit
 check, so changing them is never a conflict. If the team doesn't let users
 create tags, an admin creates each mapped tag first; otherwise the write
-saves the record, then raises `ValidationError`.
+raises `ValidationError` and saves nothing, so running it again once the tag
+exists writes the record and tags it.
 
 ## Edits made in eLabFTW
 

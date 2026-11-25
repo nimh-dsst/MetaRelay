@@ -534,6 +534,31 @@ def test_a_record_write_adds_its_mapped_tag_and_keeps_others(page) -> None:
 
 
 @live
+def test_a_failed_tag_saves_nothing_so_a_retry_still_tags(page, monkeypatch) -> None:
+    # The tag may not exist yet, and users may not be allowed to create tags.
+    # If the record were saved anyway, a retry of the same record would be a
+    # SKIP once an admin creates the tag, and the tag would never be added.
+    tags = backend.ElabFTWConfig(
+        token=TOKEN, api_url=API_URL, record_tags={TEST_SCHEMA_ID: "Surgeries"}
+    )
+    with contextlib.closing(connect(uri_for(), tags)) as session:
+        add_tag = session._client.add_tag
+
+        def refuse(entry_id: int, tag: str) -> None:
+            raise ValidationError(f"eLabFTW could not tag entry {entry_id} (HTTP 400)")
+
+        monkeypatch.setattr(session._client, "add_tag", refuse)
+        with pytest.raises(ValidationError):
+            session.write_record(page, make())
+        with pytest.raises(NotFoundError):
+            session.read_record(page, "rec-1")
+
+        monkeypatch.setattr(session._client, "add_tag", add_tag)
+        receipt = session.write_record(page, make())
+        assert "Surgeries" in entry(receipt)["tags"].split("|")
+
+
+@live
 def test_moving_or_retagging_an_entry_is_not_a_conflict(session, page) -> None:
     receipt = session.write_record(page, make())
     entry_id = receipt.backend_ids["entry_id"]

@@ -531,11 +531,13 @@ class ElabFTWSession:
             record_id=record.record_id,
         )
         if action is WriteAction.WRITE:
-            records[record.record_id] = record
-            entry, ours = self._save(entry, path, ours["kind"], records)
+            # Tag first: if tagging fails, nothing is saved, so a retry is
+            # still a write and adds the tag.
             tag = self._record_tags.get(record.schema_id)
             if tag:
                 self._client.add_tag(int(entry["id"]), tag)
+            records[record.record_id] = record
+            entry, ours = self._save(entry, path, ours["kind"], records)
         return self._receipt(path, entry, ours, records[record.record_id])
 
     def read_record(self, path: LogicalPath, record_id: str) -> StoredRecord:
