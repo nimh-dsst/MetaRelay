@@ -10,9 +10,9 @@ load a record. It's the eLabFTW counterpart of
   to reuse the steps.
 - `main()` is the command line: arguments, connecting, output, and exit codes.
 
-eLabFTW has no folders, so every container MetaRelay makes is an entry (an
-experiment, or a resource with `/resources`), and a path like
-`Fiber study/Cohort A` is an entry inside an entry. The records it loads
+The first name in a path is a category, and every container below it is an
+entry (an experiment, or a resource with `/resources`). So
+`Fiber study/Cohort A` is an entry in the `Fiber study` category. The records it loads
 follow the `lab.implant` schema in [`examples/lab_schemas.py`](../lab_schemas.py).
 A record whose schema isn't registered can't be loaded, so an application
 imports its schemas before it reads.
@@ -57,11 +57,11 @@ log in at http://localhost:3148 as `metarelay@example.org` /
 | Option | Does |
 | --- | --- |
 | `--uri URI` | The eLabFTW destination, ending in `/experiments` or `/resources` |
-| `--path "a/b"` | The entry to open. Default: list the top-level entries |
+| `--path "a/b"` | The entry to open. Default: list the categories |
 | `--record ID` | The record to load. Default: the first one |
 
-An entry with no records lists the entries inside it instead, so
-`--path "Fiber study"` shows `Cohort A/`.
+A category, or an entry with no records, lists the entries inside it
+instead, so `--path "Fiber study"` shows `Cohort A/`.
 
 ## Run it against a real eLabFTW
 

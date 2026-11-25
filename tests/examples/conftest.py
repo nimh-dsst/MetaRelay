@@ -44,20 +44,21 @@ def fake_labarchives(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[FakeLabA
 
 
 @pytest.fixture
-def elabftw(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+def elabftw(monkeypatch: pytest.MonkeyPatch, elabftw_category: str) -> tuple[str, str]:
     """The dev stack's eLabFTW, if ``METARELAY_ELABFTW_TEST_API_URL`` is set.
 
-    Yields its ``elabftw://`` URI and a fresh top-level name to work under,
-    with the ``METARELAY_ELABFTW_*`` variables set to reach it.
+    Yields its ``elabftw://`` URI and a fresh entry path in the test category
+    to work under, with the ``METARELAY_ELABFTW_*`` variables set to reach it.
     """
     pytest.importorskip("elabapi_python")
-    api_url = os.environ.get("METARELAY_ELABFTW_TEST_API_URL")
-    if not api_url:
-        pytest.skip("set METARELAY_ELABFTW_TEST_API_URL to run against eLabFTW")
+    api_url = os.environ["METARELAY_ELABFTW_TEST_API_URL"]  # elabftw_category skips without it
     monkeypatch.setenv("METARELAY_ELABFTW_TOKEN", "metarelay-dev-key")
     monkeypatch.setenv("METARELAY_ELABFTW_API_URL", api_url)
     host = api_url.split("://", 1)[1].split("/", 1)[0]
-    return f"elabftw://{host}/experiments", f"Example run {uuid.uuid4().hex[:10]}"
+    return (
+        f"elabftw://{host}/experiments",
+        f"{elabftw_category}/Example run {uuid.uuid4().hex[:10]}",
+    )
 
 
 @pytest.fixture

@@ -8,7 +8,8 @@ The live tests need a real eLabFTW (the dev stack in ``compose.yaml``)::
     pytest tests/backends/test_elabftw.py
 
 Without ``METARELAY_ELABFTW_TEST_API_URL`` they are skipped. Each test works
-under its own uniquely named top-level container, so runs never collide.
+under its own uniquely named entry in the test category (``elabftw_category``
+in ``tests/conftest.py``), so runs never collide.
 """
 
 from __future__ import annotations
@@ -83,19 +84,15 @@ def entry(receipt) -> dict:
     return found
 
 
-def unique(prefix: str) -> LogicalPath:
-    return LogicalPath((f"{prefix} {uuid.uuid4().hex[:10]}",))
-
-
 @live
 class TestElabFTWExperiments(BackendConformance):
     kind = "experiments"
     records_only_is_a_leaf = True
 
     @pytest.fixture
-    def session(self):
+    def session(self, elabftw_category):
         # The suite reuses names like "Study"; a fresh base keeps runs apart.
-        self.base = unique("MetaRelay conformance")
+        self.base = LogicalPath((elabftw_category, f"MetaRelay conformance {uuid.uuid4().hex}"))
         session = connect(uri_for(self.kind), config())
         session.ensure_container(self.base)
         yield session
@@ -271,19 +268,6 @@ def test_wrong_key_is_an_authentication_error() -> None:
 
 
 # Names and lookups (no server needed)
-
-
-def test_tags_are_every_prefix() -> None:
-    assert backend._tags(LogicalPath(("Study", "Cohort A", "M1"))) == [
-        "Study",
-        "Study/Cohort A",
-        "Study/Cohort A/M1",
-    ]
-
-
-def test_pipe_in_a_name_is_rejected() -> None:
-    with pytest.raises(ValidationError, match=r"\|"):
-        backend._check_names(LogicalPath(("a|b",)))
 
 
 TEST_SCHEMA_ID = "test.elabftw"
@@ -474,14 +458,20 @@ def session():
 
 
 @pytest.fixture
-def page(session) -> LogicalPath:
-    path = unique("MetaRelay test") / "Day 1"
+def top(elabftw_category) -> LogicalPath:
+    """A fresh entry path in the test category."""
+    return LogicalPath((elabftw_category, f"MetaRelay test {uuid.uuid4().hex[:10]}"))
+
+
+@pytest.fixture
+def page(session, top) -> LogicalPath:
+    path = top / "Day 1"
     session.ensure_container(path, holds_records=True)
     return path
 
 
 @live
-def test_entry_shows_tables_fields_and_tags(session, page) -> None:
+def test_entry_shows_tables_fields_and_category(session, page, elabftw_category) -> None:
     receipt = session.write_record(page, make())
     found = entry(receipt)
     assert "<table" in found["body"]
@@ -490,7 +480,94 @@ def test_entry_shows_tables_fields_and_tags(session, page) -> None:
     assert fields["rec-1 · label"]["value"] == "first"
     assert fields["MetaRelay path"]["readonly"] is True
     assert found["title"] == "Day 1"
-    assert sorted(found["tags"].split("|")) == sorted(backend._tags(page))
+    # Folder and record entries alike are in the path's category, with no path tags.
+    folder = api("GET", f"experiments/{session.ensure_container(page.parent).native_id}")
+    assert found["category_title"] == folder["category_title"] == elabftw_category
+    assert found["tags"] is folder["tags"] is None
+
+
+@live
+def test_categories_are_the_top_level(session, elabftw_category) -> None:
+    category = LogicalPath((elabftw_category,))
+    assert category in [c.path for c in session.list_containers()]
+    assert session.ensure_container(category).path == category
+    assert session.list_records(category) == []
+    with pytest.raises(ValidationError, match="inside a category"):
+        session.write_record(category, make())
+
+
+@live
+def test_a_missing_category_is_not_found_not_created(session) -> None:
+    category = LogicalPath((f"MetaRelay missing {uuid.uuid4().hex[:10]}",))
+    with pytest.raises(NotFoundError, match=f"No category {category.name!r}"):
+        session.ensure_container(category / "Study")
+    with pytest.raises(NotFoundError, match=f"No category {category.name!r}"):
+        session.list_containers(category)
+    assert category not in [c.path for c in session.list_containers()]
+
+
+def test_category_titles_are_matched_and_listed() -> None:
+    categories = [
+        {"id": 1, "title": "Twice"},
+        {"id": 2, "title": "Twice"},
+        {"id": 3, "title": "1/2"},
+    ]
+    client = types.SimpleNamespace(categories=lambda: categories)
+    session = backend.ElabFTWSession(client, "elabftw://elab.example.org/experiments", {})
+    # A title a path can't hold is left out of the list, not an error.
+    assert [c.path for c in session.list_containers()] == [LogicalPath(("Twice",))] * 2
+    with pytest.raises(ConflictError, match="More than one eLabFTW category"):
+        session.ensure_container(LogicalPath(("Twice", "Study")))
+
+
+@live
+def test_a_record_write_adds_its_mapped_tag_and_keeps_others(page) -> None:
+    tags = backend.ElabFTWConfig(
+        token=TOKEN, api_url=API_URL, record_tags={TEST_SCHEMA_ID: "Surgeries"}
+    )
+    with contextlib.closing(connect(uri_for(), tags)) as session:
+        receipt = session.write_record(page, make())
+        entry_id = receipt.backend_ids["entry_id"]
+        api("POST", f"experiments/{entry_id}/tags", {"tag": "Reviewed"})  # a person adds one
+        receipt = session.write_record(page, make(label="v2"), prior_receipt=receipt)
+        assert sorted(entry(receipt)["tags"].split("|")) == ["Reviewed", "Surgeries"]
+
+
+@live
+def test_a_failed_tag_saves_nothing_so_a_retry_still_tags(page, monkeypatch) -> None:
+    # The tag may not exist yet, and users may not be allowed to create tags.
+    # If the record were saved anyway, a retry of the same record would be a
+    # SKIP once an admin creates the tag, and the tag would never be added.
+    tags = backend.ElabFTWConfig(
+        token=TOKEN, api_url=API_URL, record_tags={TEST_SCHEMA_ID: "Surgeries"}
+    )
+    with contextlib.closing(connect(uri_for(), tags)) as session:
+        add_tag = session._client.add_tag
+
+        def refuse(entry_id: int, tag: str) -> None:
+            raise ValidationError(f"eLabFTW could not tag entry {entry_id} (HTTP 400)")
+
+        monkeypatch.setattr(session._client, "add_tag", refuse)
+        with pytest.raises(ValidationError):
+            session.write_record(page, make())
+        with pytest.raises(NotFoundError):
+            session.read_record(page, "rec-1")
+
+        monkeypatch.setattr(session._client, "add_tag", add_tag)
+        receipt = session.write_record(page, make())
+        assert "Surgeries" in entry(receipt)["tags"].split("|")
+
+
+@live
+def test_moving_or_retagging_an_entry_is_not_a_conflict(session, page) -> None:
+    receipt = session.write_record(page, make())
+    entry_id = receipt.backend_ids["entry_id"]
+    # A person takes the entry out of its category and tags it.
+    api("PATCH", f"experiments/{entry_id}", {"category": None})
+    api("POST", f"experiments/{entry_id}/tags", {"tag": "Reviewed"})
+    receipt = session.write_record(page, make(label="v2"), prior_receipt=receipt)
+    assert receipt.backend_ids["entry_id"] == entry_id  # found by path, not moved back
+    assert entry(receipt)["category"] is None
 
 
 @live
@@ -644,34 +721,37 @@ def test_keeps_metadata_keys_it_does_not_own(session, page) -> None:
 
 
 @live
-def test_folder_entries_hold_records_too(session) -> None:
-    folder = unique("MetaRelay test")
-    session.ensure_container(folder / "child")
+def test_folder_entries_hold_records_too(session, top) -> None:
+    session.ensure_container(top / "child")
     record = make()
-    session.write_record(folder, record)
-    assert [item.record for item in session.list_records(folder)] == [record]
-    assert [c.path for c in session.list_containers(folder)] == [folder / "child"]
+    session.write_record(top, record)
+    assert [item.record for item in session.list_records(top)] == [record]
+    assert [c.path for c in session.list_containers(top)] == [top / "child"]
 
 
 @live
-def test_names_that_search_treats_specially(session) -> None:
+@live
+def test_names_that_search_treats_specially(session, top) -> None:
     # eLabFTW's search is SQL LIKE: each of these names, sent through a real
     # search, must still find exactly its own container.
-    for name in (
-        "50%",  # % is a LIKE wildcard
-        "under_score",  # so is _
-        "back\\slash",  # a backslash goes wrong in LIKE and in the query
-        'say "hi"',  # quotes end the search literal
-        "Ünïcode",
+    for i, name in enumerate(
+        (
+            "50%",  # % is a LIKE wildcard
+            "under_score",  # so is _
+            "back\\slash",  # a backslash goes wrong in LIKE and in the query
+            'say "hi"',  # quotes end the search literal
+            "Ünïcode",
+            "a|b",
+        )
     ):
-        path = unique("MetaRelay test") / name
+        path = top / f"names {i}" / name
         created = session.ensure_container(path)
         assert session.ensure_container(path) == created, name
         assert [c.path for c in session.list_containers(path.parent)] == [path], name
 
     # LIKE ignores case, but names that differ only in case are different
     # containers.
-    base = unique("MetaRelay test")
+    base = top / "case"
     lower = session.ensure_container(base / "m1")
     upper = session.ensure_container(base / "M1")
     assert lower.native_id != upper.native_id
@@ -679,7 +759,7 @@ def test_names_that_search_treats_specially(session) -> None:
 
     # Names are compared in NFC: a decomposed and a composed "Café" are one
     # container.
-    base = unique("MetaRelay test")
+    base = top / "nfc"
     decomposed = session.ensure_container(base / "Cafe\u0301")
     composed = session.ensure_container(base / "Caf\u00e9")
     assert composed.native_id == decomposed.native_id
@@ -702,48 +782,44 @@ def copy_entry(entry_id: str) -> str:
 
 
 @live
-def test_empty_duplicate_entries_settle_on_the_oldest(session) -> None:
-    path = unique("MetaRelay test")
-    first = session.ensure_container(path)
+def test_empty_duplicate_entries_settle_on_the_oldest(session, top) -> None:
+    first = session.ensure_container(top)
     copy_entry(first.native_id)
-    assert session.ensure_container(path).native_id == first.native_id
-    session.write_record(path, make())
-    assert len(session.list_records(path)) == 1
+    assert session.ensure_container(top).native_id == first.native_id
+    session.write_record(top, make())
+    assert len(session.list_records(top)) == 1
 
 
 @live
-def test_duplicate_entry_with_records_is_the_one_used(session) -> None:
-    path = unique("MetaRelay test")
-    first = session.ensure_container(path)
+def test_duplicate_entry_with_records_is_the_one_used(session, top) -> None:
+    first = session.ensure_container(top)
     copy = copy_entry(first.native_id)
     # Put a record in the newer copy only, as if another writer used it.
     found = api("GET", f"experiments/{copy}")
     metadata = json.loads(found["metadata"])
     metadata["metarelay"]["records"]["rec-1"] = make().model_dump(mode="json")
     api("PATCH", f"experiments/{copy}", {"metadata": json.dumps(metadata)})
-    assert session.ensure_container(path).native_id == copy
+    assert session.ensure_container(top).native_id == copy
 
 
 @live
-def test_two_duplicates_with_records_are_a_conflict(session) -> None:
-    path = unique("MetaRelay test")
-    first = session.ensure_container(path)
-    session.write_record(path, make())
+def test_two_duplicates_with_records_are_a_conflict(session, top) -> None:
+    first = session.ensure_container(top)
+    session.write_record(top, make())
     copy_entry(first.native_id)  # the copy carries the record too
     with pytest.raises(ConflictError, match="More than one"):
-        session.list_records(path)
+        session.list_records(top)
 
 
 @live
-def test_racing_ensure_container_settles_on_one_entry() -> None:
+def test_racing_ensure_container_settles_on_one_entry(top) -> None:
     import threading
 
-    path = unique("MetaRelay test")
     ids: list[str] = []
 
     def ensure() -> None:
         with contextlib.closing(connect(uri_for(), config())) as racer:
-            ids.append(racer.ensure_container(path).native_id)
+            ids.append(racer.ensure_container(top).native_id)
 
     threads = [threading.Thread(target=ensure) for _ in range(3)]
     for thread in threads:
@@ -751,36 +827,24 @@ def test_racing_ensure_container_settles_on_one_entry() -> None:
     for thread in threads:
         thread.join()
     with contextlib.closing(connect(uri_for(), config())) as session:
-        settled = session.ensure_container(path).native_id
-        session.write_record(path, make())
+        settled = session.ensure_container(top).native_id
+        session.write_record(top, make())
     # Racers that each made an entry still all end up on the same one.
     assert ids == [settled] * 3
 
 
 @live
-def test_unreadable_metadata_is_an_error_not_a_new_entry(session) -> None:
+def test_unreadable_metadata_is_an_error_not_a_new_entry(session, top) -> None:
     # Someone breaks the JSON in eLabFTW's metadata editor.
-    path = unique("MetaRelay test")
-    created = session.ensure_container(path)
+    created = session.ensure_container(top)
     found = api("GET", f"experiments/{created.native_id}")
     metadata = json.loads(found["metadata"])
     metadata["metarelay"]["records"] = []
     api("PATCH", f"experiments/{created.native_id}", {"metadata": json.dumps(metadata)})
     with pytest.raises(ValidationError, match="missing or unreadable"):
-        session.ensure_container(path)
+        session.ensure_container(top)
     with pytest.raises(ValidationError, match=created.native_id):
-        session.write_record(path, make())
-
-
-@live
-def test_path_longer_than_a_tag_still_works(session) -> None:
-    base = unique("MetaRelay test")
-    path = base / ("x" * 120) / ("y" * 120)
-    created = session.ensure_container(path)
-    assert session.ensure_container(path) == created
-    tags = api("GET", f"experiments/{created.native_id}")["tags"].split("|")
-    assert len(str(path)) > backend.TAG_MAX
-    assert tags == backend._tags(path) == [str(base), str(path.parent)]
+        session.write_record(top, make())
 
 
 @live

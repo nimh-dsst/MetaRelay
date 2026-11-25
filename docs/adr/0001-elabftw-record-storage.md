@@ -4,7 +4,9 @@
   records per entry (Decision 2), refusing to overwrite hand edits until
   someone chooses to (D7, Decision 3), experiments, categories left to the
   lab, eLabFTW 6.0.9, and lookups limited to the API key's team. DSST also
-  asked to see what a hand edit changed; see Decision 3.
+  asked to see what a hand edit changed; see Decision 3. [ADR
+  0002](0002-elabftw-categories-and-tags.md) supersedes two parts of
+  Decision 2: categories left to the lab, and path-prefix tags.
 - **Issue:** #6. Plan §3.3, D3, D7, R2.
 - **Tested against:** eLabFTW 6.0.9 (`elabftw/elabimg:6.0.9`) with
   `elabapi-python` 6.0.1, using the dev stack in `compose.yaml`.
