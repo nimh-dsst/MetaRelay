@@ -472,24 +472,8 @@ def test_records_at_the_root_are_refused(session: LabArchivesSession, make_recor
 def test_other_entries_on_the_page_are_left_alone(
     session: LabArchivesSession, fake: FakeLabArchives, make_record
 ) -> None:
-    receipt = session.write_record(STUDY, make_record())
-    page_id = receipt.backend_ids["page_id"]
-    fake.add_text_entry(page_id, "<p>Lab notes</p>")
-    fake.add_attachment(page_id, "photo.png", b"png", "A photo")
-
-    session.write_record(STUDY, make_record(diameter_um=200.0), prior_receipt=receipt)
-
-    assert [entry["data"] for entry in fake.entries_on(page_id)][2:] == [
-        "<p>Lab notes</p>",
-        "A photo",
-    ]
-    assert [stored.record.record_id for stored in session.list_records(STUDY)] == ["fiber-1"]
-
-
-def test_old_chronoxiv_entries_are_left_alone(
-    session: LabArchivesSession, fake: FakeLabArchives, make_record
-) -> None:
-    # Records Chronoxiv wrote before MetaRelay. Chronoxiv migrates them (#38).
+    # Records Chronoxiv wrote before MetaRelay (Chronoxiv migrates them, #38),
+    # and a note a person adds later.
     study = session.list_containers(LogicalPath((NOTEBOOK,)))[0]
     page_id = fake.add_node(
         session.list_containers(ROOT)[0].native_id, study.native_id, "Equipment", is_page=True
@@ -505,10 +489,12 @@ def test_old_chronoxiv_entries_are_left_alone(
 
     # Same file name as Chronoxiv's equipment attachment.
     receipt = session.write_record(STUDY / "Equipment", make_record("equipment"))
+    fake.add_text_entry(page_id, "<p>Lab notes</p>")  # a person's note after ours
     updated = make_record("equipment", diameter_um=200.0)
     session.write_record(STUDY / "Equipment", updated, prior_receipt=receipt)
 
     assert fake.entries_on(page_id)[: len(old_entries)] == old_entries
+    assert fake.entries_on(page_id)[-1]["data"] == "<p>Lab notes</p>"
     assert [stored.record for stored in session.list_records(STUDY / "Equipment")] == [updated]
 
 
