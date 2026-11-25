@@ -12,10 +12,10 @@ uv sync
 ```
 
 `uv sync` creates `.venv/` with the package installed in editable mode and the
-`dev` dependency group (pytest, ruff). To work on a backend, add its extra:
+`dev` dependency group (pytest, pytest-cov, ruff). To work on a backend, add its extra:
 
 ```sh
-uv sync --extra labarchives   # or elabftw, github, nwb
+uv sync --extra labarchives   # or elabftw, github
 uv sync --all-extras          # everything
 ```
 
@@ -34,8 +34,9 @@ CI runs these on every PR. Run them before you push.
 uv run ruff check .           # lint
 uv run ruff format --check .  # formatting
 uv run pytest                 # tests
+uv run --all-extras pytest --cov  # all extras, with CI's coverage floor
 uv build                      # sdist and wheel
-uv run --group docs sphinx-build -W --keep-going -n -b html docs docs/_build/html  # docs
+uv run --group docs sphinx-build -E -W --keep-going -n -b html docs docs/_build/html  # docs
 ```
 
 `uv run ruff format .` and `uv run ruff check --fix .` fix most issues.
@@ -79,6 +80,7 @@ uv run --group docs sphinx-build -W --keep-going -n -b html docs docs/_build/htm
   | `BackendConformance` | That every backend wires the contract up | A missing container is `NotFoundError` on every backend |
   | `tests/backends/`, `tests/testing/` | One backend's own storage, races and errors | GitHub retries a racing commit; local refuses `CON` |
   | `tests/examples/` | What each example itself prints and handles | The LabArchives example hides the signed login link |
+  | `tests/test_*.py` | The CLI, packaging, and the docs site | The base install pulls in no backend |
 
   In a parametrized table, keep one case per branch of the code, not one per
   value. Don't test what a library guarantees: pydantic round trips, enum
@@ -96,7 +98,7 @@ and published to <https://nimh-dsst.github.io/MetaRelay/> on every push to `main
 Build it locally with the `docs` dependency group:
 
 ```sh
-uv run --group docs sphinx-build -W --keep-going -n -b html docs docs/_build/html
+uv run --group docs sphinx-build -E -W --keep-going -n -b html docs docs/_build/html
 ```
 
 Open `docs/_build/html/index.html` to read it. CI runs the same build on every

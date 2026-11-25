@@ -32,37 +32,23 @@ set `METARELAY_GITHUB_TOKEN`. MetaRelay keeps it in memory for the session
 and never writes it to a receipt, log, or file. A fine-grained token needs
 **Contents: read and write** on the repository (read-only works for reading).
 
-`GitHubConfig` also takes, or reads from `METARELAY_GITHUB_*`:
+`GitHubConfig` takes these settings, and reads each one you don't pass from
+its variable:
 
-| Setting | Default | |
-| --- | --- | --- |
-| `api_url` | `https://api.github.com` | `https://<host>/api/v3` for GitHub Enterprise Server |
-| `max_file_bytes` | 1 MB | The largest file `write_file` accepts, up to 50 MB |
-| `timeout` | 30 | Seconds per request |
-
-### Credentials
-
-`GitHubConfig()` reads `METARELAY_GITHUB_TOKEN`, and the settings above from
-`METARELAY_GITHUB_API_URL`, `METARELAY_GITHUB_MAX_FILE_BYTES`, and
-`METARELAY_GITHUB_TIMEOUT`, for anything not passed:
+| Setting | Variable | Default | |
+| --- | --- | --- | --- |
+| `token` | `METARELAY_GITHUB_TOKEN` | none | Required |
+| `api_url` | `METARELAY_GITHUB_API_URL` | `https://api.github.com` | `https://<host>/api/v3` for GitHub Enterprise Server |
+| `max_file_bytes` | `METARELAY_GITHUB_MAX_FILE_BYTES` | 1 MB | The largest file `write_file` accepts, up to 50 MB |
+| `timeout` | `METARELAY_GITHUB_TIMEOUT` | 30 | Seconds per request |
 
 ```sh
 # .env
 METARELAY_GITHUB_TOKEN=github_pat_...
 ```
 
-MetaRelay never looks for a `.env` file on its own. Name it with
-`_env_file=`, a supported argument despite the underscore (it comes from
-`pydantic-settings`). From the
-[`credentials_env_file` example](../examples/credentials_env_file.py):
-
-<!-- example: credentials_env_file.py#env-file -->
-```python
-session = connect(uri, GitHubConfig(_env_file=env_file))
-```
-
-Variables already set in the environment win over the file. Add `.env` to
-your `.gitignore` so the token is never committed.
+MetaRelay reads a `.env` file only when you name it: see
+[Credentials](concepts.md#credentials).
 
 ## Opening a folder
 
@@ -142,12 +128,9 @@ write raises `ConflictError` instead. `mode="create"` raises `ConflictError`
 if the record exists, even if it was created during the write.
 
 Editing the `.md` preview on github.com is also a `ConflictError` on the next
-write (D7), even if your code read the record after the edit. The error's
-`preview_diff` lists the values that changed. Keep the edits with
-`accept_edits`, which copies them into the record and writes it, or
-`metarelay write --accept-edits`
-([Concepts](concepts.md#when-someone-edited-the-preview)); or replace them
-with `mode="force"`.
+write, even if your code read the record after the edit. The error's
+`preview_diff` lists the values that changed. To keep or replace them, see
+[Concepts](concepts.md#when-someone-edited-the-preview).
 
 ## Files are size-capped
 

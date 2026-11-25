@@ -9,11 +9,15 @@ description = "A backend-agnostic Python interface for writing NWB metadata to e
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
+authors = [{ name = "MetaRelay contributors" }]
 requires-python = ">=3.12"
+keywords = ["nwb", "metadata", "electronic-lab-notebook", "labarchives", "elabftw"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -31,14 +35,8 @@ dependencies = [
 labarchives = ["labapi>=1.2.0,<2"]
 elabftw = ["elabapi-python>=6,<7"]
 github = ["httpx>=0.28,<1"]
-nwb = [
-    "pynwb>=4.1,<5",
-    "ndx-fiber-photometry>=0.2.3,<0.3",
-    "ndx-microscopy>=0.4,<0.5",
-    "ndx-ophys-devices>=0.4,<0.5",
-]
 testing = ["pytest>=9"]
-all = ["metarelay[labarchives,elabftw,github,nwb,testing]"]
+all = ["metarelay[labarchives,elabftw,github,testing]"]
 
 [project.scripts]
 metarelay = "metarelay.cli:main"
@@ -53,6 +51,7 @@ github = "metarelay.backends.github:GitHubBackend"
 Documentation = "https://nimh-dsst.github.io/MetaRelay/"
 Repository = "https://github.com/nimh-dsst/MetaRelay"
 Issues = "https://github.com/nimh-dsst/MetaRelay/issues"
+Changelog = "https://github.com/nimh-dsst/MetaRelay/releases"
 
 [dependency-groups]
 dev = [
@@ -84,6 +83,7 @@ include = [
     "/README.md",
     "/CONTRIBUTING.md",
     "/LICENSE",
+    "/docker/fake-labarchives/seed.json",
 ]
 
 [tool.pytest.ini_options]

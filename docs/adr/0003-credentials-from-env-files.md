@@ -1,7 +1,7 @@
 # ADR 0003: Reading credentials from a `.env` file
 
 - **Status:** Accepted 2026-11-24.
-- **Issue:** #39.
+- **Issue:** [#39](https://github.com/nimh-dsst/MetaRelay/issues/39).
 
 ## Context
 
@@ -31,7 +31,7 @@ those `.env` files stop working after the switch.
    `ACCESS_KEYID` is set, the `ConfigurationError` names
    `METARELAY_LABARCHIVES_AKID` and `METARELAY_LABARCHIVES_AKPASS`, never the
    value. `docs/labarchives.md` has a migration note, and ChronoXIV maps the
-   old names in its own shim during the switch (nimh-dsst/chronoxiv#68).
+   old names in its own shim during the switch ([nimh-dsst/chronoxiv#68](https://github.com/nimh-dsst/chronoxiv/issues/68)).
 4. **No `--env-file` option on the CLI for now.** The CLI calls
    `connect(args.uri)` with no config, so adding one later is small. Revisit
    if DSST asks.

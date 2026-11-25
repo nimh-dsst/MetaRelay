@@ -5,8 +5,8 @@ records to electronic lab notebooks, GitHub, and local disk. You pick a
 destination and pass validated metadata records. MetaRelay handles the rest.
 
 :::{note}
-MetaRelay is pre-alpha. The core interface and the local, LabArchives,
-eLabFTW, and GitHub backends are in progress.
+MetaRelay is pre-alpha: the API may change before 1.0. Built-in NWB schemas
+are planned. Until then, you register your own.
 :::
 
 New here? Start with the [Quickstart](quickstart.md), then read
@@ -36,8 +36,12 @@ github
 
 contributing
 architecture
-IMPLEMENTATION_PLAN
-adr/0001-elabftw-record-storage
-adr/0002-elabftw-categories-and-tags
-adr/0003-credentials-from-env-files
+```
+
+```{toctree}
+:caption: Design decisions
+:maxdepth: 1
+:glob:
+
+adr/*
 ```

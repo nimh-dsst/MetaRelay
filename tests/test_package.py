@@ -7,7 +7,7 @@ from packaging.requirements import Requirement
 import metarelay
 
 PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
-EXTRAS = {"labarchives", "elabftw", "github", "nwb", "testing"}
+EXTRAS = {"labarchives", "elabftw", "github", "testing"}
 
 
 def _requirements() -> list[Requirement]:

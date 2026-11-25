@@ -49,23 +49,15 @@ METARELAY_LABARCHIVES_AKID=...
 METARELAY_LABARCHIVES_AKPASS=...
 ```
 
-MetaRelay never looks for a `.env` file on its own. Name it with
-`_env_file=`, a supported argument despite the underscore (it comes from
-`pydantic-settings`):
-
-```python
-config = LabArchivesConfig(_env_file=".env")
-```
-
-Variables already set in the environment win over the file. Add `.env` to
-your `.gitignore` so the key pair is never committed.
+MetaRelay reads a `.env` file only when you name it: see
+[Credentials](concepts.md#credentials).
 
 **Moving from `labapi`'s `.env` (ChronoXIV).** `labapi.Client()` loads `.env`
 by itself and reads `ACCESS_KEYID`, `ACCESS_PWD`, and `API_URL`. MetaRelay
 doesn't accept those names, since they are too generic to be sure they mean
 LabArchives. Rename them to `METARELAY_LABARCHIVES_AKID`,
 `METARELAY_LABARCHIVES_AKPASS`, and `METARELAY_LABARCHIVES_API_URL`, and pass
-the file with `_env_file=`. If `ACCESS_KEYID` is set and the new key isn't,
+the file with `_env_file=`. If `ACCESS_KEYID` is set in the environment and the new key isn't,
 the `ConfigurationError` names the new variables.
 
 ## Opening a notebook
@@ -119,7 +111,7 @@ so they aren't listed as containers and can't be created with
 
 Records Chronoxiv wrote before it used MetaRelay (`ChronoXIV metadata | ...`
 captions) are a different format and aren't read here. Chronoxiv's own
-migration converts them (plan D6, Goal 1c).
+migration converts them.
 
 ## Errors
 
@@ -140,7 +132,7 @@ don't find the code there, so a bad login would not raise
 
 The JSON attachment is the source of truth. If someone changes it, or edits
 the table entry, in LabArchives, the next write raises `ConflictError`
-instead of overwriting their change (D7). That holds even if they deleted
+instead of overwriting their change. That holds even if they deleted
 everything in the table entry (the attachment's caption names the entry), and
 even if your code read the record after the edit: a read returns the JSON,
 not the table, so its receipt keeps the table's checksum from MetaRelay's
@@ -152,8 +144,6 @@ The error's `preview_diff` lists the values that changed in the table entry
 stores, so MetaRelay reads only the text of headings and table cells. That
 is best effort: if LabArchives changes the markup more than that, the list
 may be empty or marked incomplete.
-To keep the edits, `accept_edits` copies them into the record and writes it,
-or run `metarelay write --accept-edits` ([Concepts](concepts.md#when-someone-edited-the-preview)).
 
 ## Developing without a LabArchives account
 

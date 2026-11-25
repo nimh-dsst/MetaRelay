@@ -15,7 +15,7 @@ D7, ...) are in [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 | `src/metarelay/backends/` | One module per backend: `local.py` (`file://`), `labarchives.py` (`labarchives://`), `elabftw.py` (`elabftw://`), `github.py` (`github://`) |
 | `src/metarelay/testing/` | `MemorySession`, the conformance suite, the fake GitHub server, and the fake LabArchives server with its smoke and cassette tools |
 | `src/metarelay/cli.py` | The `metarelay` command |
-| `tests/` | One folder per package folder, plus `tests/examples/` for the examples |
+| `tests/` | One folder per package folder, `tests/examples/` for the examples, and top-level tests for the CLI, packaging, and docs site |
 | `examples/` | Runnable examples. Indexed in [`docs/examples.md`](docs/examples.md) |
 | `docs/` | User and developer docs, and the Sphinx site (`conf.py`, `index.md`) |
 | `docker/`, `compose.yaml` | The dev stack: the fake LabArchives server and a real eLabFTW |
@@ -27,13 +27,15 @@ uv sync --all-extras          # every backend and extra
 uv run ruff check .           # lint
 uv run ruff format --check .  # formatting
 uv run pytest                 # tests, examples, and the docs drift check
+uv run --all-extras pytest --cov  # what CI runs, with an 87% coverage floor
 uv build                      # sdist and wheel
-uv run --group docs sphinx-build -W --keep-going -n -b html docs docs/_build/html  # docs site
+uv run --group docs sphinx-build -E -W --keep-going -n -b html docs docs/_build/html  # docs site
 docker compose up -d          # fake LabArchives on 8080, eLabFTW on 3148 (seed it: see CONTRIBUTING.md)
 ```
 
-CI runs the same checks on Python 3.12, 3.13, and 3.14, once with the base
-install and once with all extras. `uv run ruff format .` and
+CI runs the tests on Python 3.12, 3.13, and 3.14, once with the base install
+and once with all extras and the coverage floor. Lint, build, docs, and the
+real-eLabFTW tests run on 3.12. `uv run ruff format .` and
 `uv run ruff check --fix .` fix most lint.
 
 ## Rules that hold everywhere

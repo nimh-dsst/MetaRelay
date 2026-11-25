@@ -34,16 +34,8 @@ and `METARELAY_ELABFTW_VERIFY_TLS` for anything not passed:
 METARELAY_ELABFTW_TOKEN=...
 ```
 
-MetaRelay never looks for a `.env` file on its own. Name it with
-`_env_file=`, a supported argument despite the underscore (it comes from
-`pydantic-settings`):
-
-```python
-config = ElabFTWConfig(_env_file=".env")
-```
-
-Variables already set in the environment win over the file. Add `.env` to
-your `.gitignore` so the key is never committed.
+MetaRelay reads a `.env` file only when you name it: see
+[Credentials](concepts.md#credentials).
 
 ## Opening an entry
 
@@ -120,7 +112,7 @@ takes a value from the tables or fields unless you accept the edit.
 
 At each write, MetaRelay saves a checksum of the entry's body and fields as
 eLabFTW saved them. If someone edits either one in eLabFTW, the next write
-into that entry raises `ConflictError` instead of overwriting the edit (D7).
+into that entry raises `ConflictError` instead of overwriting the edit.
 That's true for every record in the entry, and even if your code read the
 record after the edit. Keep the edit by copying it into the record, or
 replace it with `mode="force"`. Forcing rebuilds the whole entry from the
@@ -134,8 +126,6 @@ editor reformats the HTML. The same change made in both places is listed
 once. It is complete only if nothing else changed: no text added outside
 the tables, no table or heading renamed, no field added or retyped, and the
 body and the fields don't disagree about a value.
-To keep the edits, `accept_edits` copies them into the record and writes it,
-or run `metarelay write --accept-edits` ([Concepts](concepts.md#when-someone-edited-the-preview)).
 
 ## Limits
 

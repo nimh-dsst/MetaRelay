@@ -118,8 +118,9 @@ _T = TypeVar("_T")
 class GitHubConfig(TokenConfig):
     """A GitHub token, plus optional settings.
 
-    Reads ``METARELAY_GITHUB_TOKEN``, ``METARELAY_GITHUB_API_URL`` and
-    ``METARELAY_GITHUB_MAX_FILE_BYTES`` when not passed.
+    Reads ``METARELAY_GITHUB_TOKEN``, ``METARELAY_GITHUB_API_URL``,
+    ``METARELAY_GITHUB_MAX_FILE_BYTES`` and ``METARELAY_GITHUB_TIMEOUT`` when
+    not passed.
     """
 
     model_config = SettingsConfigDict(env_prefix="METARELAY_GITHUB_")
