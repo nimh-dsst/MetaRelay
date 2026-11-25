@@ -25,8 +25,6 @@ import re
 import textwrap
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parents[2]
 EXAMPLES = REPO / "examples"
 DOCS = sorted([REPO / "README.md", *(REPO / "docs").glob("*.md")])
@@ -84,21 +82,18 @@ def sync_docs() -> list[Path]:
     return changed
 
 
-@pytest.mark.parametrize(
-    ("doc", "match"),
-    snippets(),
-    ids=lambda value: value.name if isinstance(value, Path) else value["name"],
-)
-def test_doc_snippet_matches_the_example(doc: Path, match: re.Match[str]) -> None:
-    key = (match["file"], match["name"])
+def test_every_doc_snippet_matches_the_example() -> None:
     known = regions()
-    assert key in known, (
-        f"{doc.name} shows examples/{match['file']}#{match['name']}, "
-        "but no example marks that region."
-    )
-    assert match["body"] == known[key], (
-        f"{doc.name} no longer matches examples/{match['file']}#{match['name']}. "
-        "Run: uv run python tests/examples/test_docs_snippets.py"
+    problems = []
+    for doc, match in snippets():
+        key = (match["file"], match["name"])
+        shown = f"{doc.name} shows examples/{match['file']}#{match['name']}"
+        if key not in known:
+            problems.append(f"{shown}, but no example marks that region.")
+        elif match["body"] != known[key]:
+            problems.append(f"{shown}, and no longer matches it.")
+    assert problems == [], (
+        "\n".join(problems) + "\nRun: uv run python tests/examples/test_docs_snippets.py"
     )
 
 
@@ -108,9 +103,10 @@ def test_every_marked_region_is_shown_in_the_docs() -> None:
     assert unused == [], f"Marked in an example but shown in no doc: {unused}"
 
 
-@pytest.mark.parametrize("name", DOCS_THAT_MUST_USE_EXAMPLES)
-def test_doc_shows_code_from_the_examples(name: str) -> None:
-    assert any(doc.name == name for doc, _ in snippets()), f"docs/{name} shows no example code."
+def test_the_guides_show_code_from_the_examples() -> None:
+    showing = {doc.name for doc, _ in snippets()}
+    missing = [f"docs/{name}" for name in DOCS_THAT_MUST_USE_EXAMPLES if name not in showing]
+    assert missing == [], f"These docs show no example code: {missing}"
 
 
 if __name__ == "__main__":

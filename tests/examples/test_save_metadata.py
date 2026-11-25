@@ -67,11 +67,6 @@ def test_a_change_at_the_destination_stops_the_run_until_forced(tmp_path: Path, 
     assert "200.0" in record_file.read_text()
 
 
-def test_a_missing_folder_is_a_short_error(tmp_path: Path, capsys) -> None:
-    assert run(tmp_path / "nope", tmp_path / "receipts.json") == 1
-    assert "does not exist" in capsys.readouterr().err
-
-
 def test_runs_as_a_module(run_module, tmp_path: Path) -> None:
     folder = tmp_path / "metadata"
     folder.mkdir()

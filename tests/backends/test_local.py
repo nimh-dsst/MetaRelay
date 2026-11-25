@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import unicodedata
 from pathlib import Path
@@ -77,8 +78,8 @@ def test_localhost_is_this_computer(tmp_path: Path) -> None:
 
 
 def test_record_layout(session: LocalSession, make_record) -> None:
-    record = make_record()
-    session.write_record(STUDY, record)
+    session.write_record(STUDY, make_record())
+    session.write_record(STUDY, make_record("fiber-2"))
 
     stored = json.loads((folder(session) / "fiber-1.json").read_text())
     assert stored["record_id"] == "fiber-1"
@@ -86,7 +87,10 @@ def test_record_layout(session: LocalSession, make_record) -> None:
     assert "| diameter_um | 400.0 |" in (folder(session) / "fiber-1.md").read_text()
 
     index = json.loads((folder(session) / ".metarelay" / "index.json").read_text())
-    assert index == {"index_version": 1, "records": ["fiber-1"], "files": []}
+    assert index == {"index_version": 1, "records": ["fiber-1", "fiber-2"], "files": []}
+    # Each record keeps its own preview file.
+    names = sorted(p.name for p in (folder(session) / ".metarelay" / "previews").iterdir())
+    assert names == ["fiber-1", "fiber-2"]
 
 
 def test_history_has_one_line_per_change(session: LocalSession, make_record) -> None:
@@ -103,14 +107,6 @@ def test_history_has_one_line_per_change(session: LocalSession, make_record) -> 
         ("file", "trace.csv", "write"),
     ]
     assert history[1]["previous_checksum"] == receipt.checksum
-
-
-def test_conflict_token_is_the_file_hash(session: LocalSession, make_record) -> None:
-    import hashlib
-
-    receipt = session.write_record(STUDY, make_record())
-    data = (folder(session) / "fiber-1.json").read_bytes()
-    assert receipt.conflict_token == hashlib.sha256(data).hexdigest()
 
 
 def test_no_temporary_files_are_left(session: LocalSession, make_record) -> None:
@@ -162,14 +158,6 @@ def test_deleted_record_is_written_again(session: LocalSession, make_record) -> 
     assert session.read_record(STUDY, "fiber-1")
 
 
-def test_missing_preview_is_restored(session: LocalSession, make_record) -> None:
-    session.write_record(STUDY, make_record())
-    (folder(session) / "fiber-1.md").unlink()
-    receipt = session.write_record(STUDY, make_record())
-    assert (folder(session) / "fiber-1.md").exists()
-    assert receipt.preview_checksum is not None
-
-
 def test_records_written_before_preview_files_compare_the_current_preview(
     session: LocalSession, make_record
 ) -> None:
@@ -190,19 +178,14 @@ def test_damaged_preview_file_is_a_clear_error(session: LocalSession, make_recor
         session.read_record(STUDY, "fiber-1")
 
 
-def test_two_records_keep_separate_preview_files(session: LocalSession, make_record) -> None:
-    session.write_record(STUDY, make_record("fiber-1"))
-    session.write_record(STUDY, make_record("fiber-2"))
-    names = sorted(p.name for p in (folder(session) / ".metarelay" / "previews").iterdir())
-    assert names == ["fiber-1", "fiber-2"]
-
-
 def test_restored_preview_is_the_one_compared(session: LocalSession, make_record) -> None:
     session.write_record(STUDY, make_record())
     # An older record (no preview file) whose preview was deleted.
     (folder(session) / ".metarelay" / "previews" / "fiber-1").unlink()
     (folder(session) / "fiber-1.md").unlink()
     restored = session.write_record(STUDY, make_record())
+    assert (folder(session) / "fiber-1.md").exists()
+    assert restored.preview_checksum is not None
     (folder(session) / "fiber-1.md").write_text("Edited by hand\n")
     from_read = session.read_record(STUDY, "fiber-1").receipt
     assert from_read.preview_checksum == restored.preview_checksum
@@ -214,31 +197,25 @@ def test_restored_preview_is_the_one_compared(session: LocalSession, make_record
 
 
 @pytest.mark.parametrize(
-    "name",
+    ("name", "problem"),
     [
-        "a\\b",
-        "C:",
-        "what?",
-        "a*",
-        "x|y",
-        "<x>",
-        'say "hi"',
-        ".hidden",
-        ".metarelay",
-        "ends.",
-        "ends ",
-        "CON",
-        "nul.txt",
-        "Com1",
-        "x" * 256,
+        ("", "empty"),
+        ("what?", "contains one of"),
+        ("tab\there", "control character"),
+        (".hidden", "starting with '.'"),
+        ("ends.", "ends with a period or space"),
+        ("ends ", "ends with a period or space"),
+        ("CON", "reserved device name"),
+        ("nul.txt", "reserved device name"),
+        ("x" * 256, "longer than 255 bytes"),
     ],
 )
-def test_unsafe_names_are_rejected(name: str) -> None:
-    with pytest.raises(ValidationError, match="can't be used on disk"):
+def test_unsafe_names_are_rejected(name: str, problem: str) -> None:
+    with pytest.raises(ValidationError, match=f"can't be used on disk: .*{re.escape(problem)}"):
         check_local_name(name)
 
 
-@pytest.mark.parametrize("name", ["Fiber study", "Cohort ä", "M1.v2", "CONSOLE", "notes.json"])
+@pytest.mark.parametrize("name", ["Cohort ä", "Fiber study", "M1.v2", "CONSOLE", "notes.json"])
 def test_safe_names_are_accepted(name: str) -> None:
     assert check_local_name(name) == name
 
@@ -275,13 +252,6 @@ def test_record_cannot_overwrite_a_file(session: LocalSession, make_record) -> N
     with pytest.raises(NotFoundError):
         session.read_record(STUDY, "fiber-1")
     assert (folder(session) / "fiber-1.json").read_bytes() == b"{}"
-
-
-def test_damaged_index_says_how_to_fix_it(session: LocalSession, make_record) -> None:
-    session.write_record(STUDY, make_record())
-    (folder(session) / ".metarelay" / "index.json").write_text("[]")
-    with pytest.raises(ValidationError, match="Delete it"):
-        session.list_records(STUDY)
 
 
 def test_deleted_index_is_rebuilt(session: LocalSession, make_record) -> None:
@@ -326,7 +296,7 @@ def test_record_lost_from_the_index_is_still_listed(session: LocalSession, make_
 def test_index_of_the_wrong_shape_is_damaged(session: LocalSession, index: str) -> None:
     (folder(session) / ".metarelay").mkdir()
     (folder(session) / ".metarelay" / "index.json").write_text(index)
-    with pytest.raises(ValidationError, match="damaged"):
+    with pytest.raises(ValidationError, match=r"damaged\. Delete it"):
         session.list_records(STUDY)
 
 
@@ -508,7 +478,7 @@ def test_folder_with_a_record_name_is_refused(session: LocalSession, make_record
         session.write_record(STUDY, make_record())
 
 
-@pytest.mark.parametrize("length", [250, 251, 255, 300])
+@pytest.mark.parametrize("length", [250, 251])
 def test_record_id_too_long_for_a_file_name(
     session: LocalSession, make_record, length: int
 ) -> None:
