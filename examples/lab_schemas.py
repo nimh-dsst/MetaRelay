@@ -1,7 +1,7 @@
 """The schema every example uses. Importing this module registers it.
 
-MetaRelay's own fiber-photometry and microscopy schemas arrive in #10 and #11.
-Until then, the examples register a small one the way an application would.
+MetaRelay's own fiber-photometry and microscopy schemas are planned. Until
+then, the examples register a small one the way an application would.
 """
 
 # [docs:schema]

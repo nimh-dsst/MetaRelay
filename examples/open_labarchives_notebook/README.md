@@ -1,7 +1,7 @@
 # Open a LabArchives notebook
 
 Log in to LabArchives, list your notebooks, open one, and load a record. This
-is the first thing the Chronoxiv migration rebuilds (Goal 1c).
+is the first thing the Chronoxiv migration rebuilds.
 
 `open_labarchives_notebook.py` has two layers:
 

@@ -12,10 +12,14 @@ src/metarelay/
 ├── core/                backend-neutral: the public API, and it imports no backend
 ├── backends/
 │   ├── local.py         file://, the reference backend
-│   └── labarchives.py   labarchives://, built on labapi
+│   ├── labarchives.py   labarchives://, built on labapi
+│   ├── elabftw.py       elabftw://, built on elabapi-python
+│   ├── elabftw_client.py  the eLabFTW API calls and their error mapping
+│   └── github.py        github://, the Git Data API over httpx
 └── testing/
     ├── memory.py              an in-memory backend for tests, the smallest backend to read
     ├── conformance.py         the suite every backend must pass (BackendConformance)
+    ├── github_fake.py         a fake GitHub API server, standard library only
     ├── labarchives_fake.py    a fake LabArchives API server, standard library only
     ├── labarchives_smoke.py   a live check DSST runs against real LabArchives
     └── labarchives_cassettes.py  records traffic, and compares the fake with it
@@ -117,3 +121,7 @@ LabArchives follows the same steps from step 6, with notebook pages for
 folders and entries for files. Its login replaces steps 3 and 4:
 `begin_login()` returns a link, and `complete_login()` turns the redirect's
 query parameters into a `LabArchivesSession`.
+
+eLabFTW and GitHub also follow the same steps from step 6, with experiments
+and commits. Both are `TOKEN` backends, so step 3 calls their `open()`
+with the token from the config, as it does for the local backend.

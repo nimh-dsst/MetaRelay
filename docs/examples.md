@@ -5,6 +5,7 @@ runs without an account, and CI runs each one end to end.
 
 | Example | Task | Needs |
 | --- | --- | --- |
+| [`first_write`](../examples/first_write.py) | The README's first write: write one record to `./metadata` and read it back. Run it as a script, not a module | Base install |
 | [`save_metadata`](../examples/save_metadata/README.md) | Write a record to any destination, read it back, update it, and handle a conflict | Base install |
 | [`open_labarchives_notebook`](../examples/open_labarchives_notebook/README.md) | Log in to LabArchives, list notebooks, open one, and load a record | `metarelay[labarchives]`, and the fake server from `docker compose up` |
 | [`open_elabftw_experiment`](../examples/open_elabftw_experiment/README.md) | Connect to eLabFTW with an API key, list entries, open one, and load a record | `metarelay[elabftw]`, and eLabFTW from `docker compose up elabftw` |
@@ -29,7 +30,7 @@ uv run python -m examples.save_metadata "file://$PWD/metadata"
 | File | Holds |
 | --- | --- |
 | [`examples/login.py`](../examples/login.py) | `open_session(uri)`: `connect()` for most backends (eLabFTW reads its API key from `METARELAY_ELABFTW_TOKEN`, GitHub its token from `METARELAY_GITHUB_TOKEN`), the browser login for LabArchives |
-| [`examples/lab_schemas.py`](../examples/lab_schemas.py) | The `lab.implant` schema every example uses. MetaRelay's own schemas replace it in #10 and #11 |
+| [`examples/lab_schemas.py`](../examples/lab_schemas.py) | The `lab.implant` schema every example uses. Used until MetaRelay ships its own schemas |
 
 ## How they stay correct
 
@@ -41,13 +42,10 @@ uv run python -m examples.save_metadata "file://$PWD/metadata"
   and as `python -m examples.<name>`. The eLabFTW tests run against the dev
   stack's eLabFTW when `METARELAY_ELABFTW_TEST_API_URL` is set, as in CI's
   `elabftw` job.
-- The code in the [quickstart](quickstart.md), [concepts](concepts.md),
-  [LabArchives](labarchives.md), [eLabFTW](elabftw.md), and [GitHub](github.md) pages is copied from marked regions of the
-  examples. `tests/examples/test_docs_snippets.py` fails if a page and its
-  example drift apart. After changing an example, update the pages with
-  `uv run python tests/examples/test_docs_snippets.py`.
+- The code in the README and these docs is copied from the examples, and a
+  test fails if the two drift apart. See [Contributing](contributing.md#tests).
 
-Writing a backend isn't an example here. The "write a backend" guide (#13)
-covers it. Until then, read `src/metarelay/testing/memory.py` (the smallest
+Writing a backend isn't an example here. A guide to writing one is planned.
+Until then, read `src/metarelay/testing/memory.py` (the smallest
 backend), then `backends/local.py` and `backends/labarchives.py`, and see
 [architecture](architecture.md).

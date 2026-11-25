@@ -3,7 +3,7 @@
 - **Status:** Accepted. Confirmed by DSST on 2026-11-20. Supersedes two parts
   of [ADR 0001](0001-elabftw-record-storage.md): categories left to the lab,
   and tagging each entry with every prefix of its path.
-- **Issue:** #37.
+- **Issue:** [#37](https://github.com/nimh-dsst/MetaRelay/issues/37).
 - **Tested against:** eLabFTW 6.0.9 (`elabftw/elabimg:6.0.9`), using the dev
   stack in `compose.yaml`.
 

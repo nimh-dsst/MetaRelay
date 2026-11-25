@@ -8,6 +8,11 @@ __pycache__/
 .coverage
 htmlcov/
 .DS_Store
+.claude/
+
+# Written by examples run from the repository root
+/receipts.json
+/metadata/
 
 # Build output
 dist/

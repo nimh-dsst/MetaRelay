@@ -36,12 +36,16 @@ extensions = [
 ]
 
 source_suffix = {".md": "markdown"}
-exclude_patterns = ["_build"]
+# The original build plan stays in the repository for the team, off the site.
+exclude_patterns = ["_build", "IMPLEMENTATION_PLAN.md"]
 language = "en"
 
 myst_enable_extensions = ["colon_fence"]
 # Headings up to this level get anchors, so links like concepts.md#write-modes resolve.
 myst_heading_anchors = 3
+
+# GitHub builds heading anchors in the browser, so linkcheck can't see them.
+linkcheck_anchors_ignore_for_url = [r"https://github\.com/.*"]
 
 # -- Options for HTML output -------------------------------------------------
 

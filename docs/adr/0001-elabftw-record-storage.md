@@ -7,7 +7,9 @@
   asked to see what a hand edit changed; see Decision 3. [ADR
   0002](0002-elabftw-categories-and-tags.md) supersedes two parts of
   Decision 2: categories left to the lab, and path-prefix tags.
-- **Issue:** #6. Plan §3.3, D3, D7, R2.
+- **Issue:** [#6](https://github.com/nimh-dsst/MetaRelay/issues/6). Decisions D3 (this spike) and D7 (a direct edit in
+  the notebook is caught, never overwritten) in the
+  [implementation plan](https://github.com/nimh-dsst/MetaRelay/blob/main/docs/IMPLEMENTATION_PLAN.md).
 - **Tested against:** eLabFTW 6.0.9 (`elabftw/elabimg:6.0.9`) with
   `elabapi-python` 6.0.1, using the dev stack in `compose.yaml`.
 
@@ -18,7 +20,7 @@ MetaRelay has to put a record (validated JSON) into eLabFTW so that:
 1. MetaRelay can read back exactly what it wrote;
 2. people can find and read the metadata in eLabFTW without Chronoxiv;
 3. a direct edit in eLabFTW is caught, not silently overwritten (D7);
-4. the entry body shows the metadata as tables, never only raw JSON (#6).
+4. the entry body shows the metadata as tables, never only raw JSON ([#6](https://github.com/nimh-dsst/MetaRelay/issues/6)).
 
 eLabFTW has no folders, only flat **categories** (one per entry) and
 **tags** (many per entry). The shared contract
@@ -62,7 +64,7 @@ It used fixed numbered fields ("Inj 1..5") for repeated items, because
   exactly, keyed by record ID, plus a format version and the container's
   path.
 - **The body: the record as tables**, from `render_preview`. Plain search
-  finds it, and it meets #6's "tables, never only raw JSON" criterion.
+  finds it, and it meets [#6](https://github.com/nimh-dsst/MetaRelay/issues/6)'s "tables, never only raw JSON" criterion.
 - **`metadata.extra_fields`: the same rows as eLabFTW fields**, grouped
   (`elabftw.extra_fields_groups`) by record and table, as DSST's prototype
   did. These are text fields, because the record JSON is the typed copy.

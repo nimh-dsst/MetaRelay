@@ -54,38 +54,9 @@ your receipt. MetaRelay never picks a winner. Show the person both versions
   `mode=WriteMode.FORCE`. Your record now holds both.
 - **Keep yours:** write it with `mode=WriteMode.FORCE`.
 
-The [`save_metadata` example](../examples/save_metadata/README.md) writes
-every record this way. It stops on a conflict unless the person already
-chose to replace the change:
-
-<!-- example: save_metadata/save_metadata.py#write-with-receipt -->
-```python
-def write(
-    session: Session,
-    where: LogicalPath,
-    record: Record,
-    receipts: SyncIndex,
-    *,
-    force: bool = False,
-) -> Receipt:
-    """Write ``record`` with the receipt from the last write, and keep the new one.
-
-    Raises:
-        ConflictError: If the record changed at the destination since then,
-            unless ``force`` is set.
-    """
-    prior = receipts.get(session.destination, where, record.record_id)
-    try:
-        receipt = session.write_record(where, record, prior_receipt=prior)
-    except ConflictError:
-        # Someone changed the record at the destination since `prior`.
-        # Stop, unless the person already chose to replace their change.
-        if not force:
-            raise
-        receipt = session.write_record(where, record, mode=WriteMode.FORCE)
-    receipts.put(receipt)
-    return receipt
-```
+The [quickstart](quickstart.md#from-python) wraps this in a `write()` helper
+that stops on a conflict unless the person already chose to replace the
+change.
 
 ### When someone edited the preview
 
@@ -153,6 +124,26 @@ Every backend raises the same errors, all subclasses of `MetaRelayError`:
 | `NotFoundError` | No such container or record |
 | `ConflictError` | The write would overwrite someone else's change |
 | `ValidationError` | A record, payload or name is invalid |
+
+## Credentials
+
+The LabArchives, eLabFTW, and GitHub configs read each setting you don't
+pass from a `METARELAY_<BACKEND>_*` environment variable, such as
+`METARELAY_GITHUB_TOKEN`. The backend pages list them. MetaRelay keeps
+credentials in memory for the session and never saves them.
+
+MetaRelay never looks for a `.env` file on its own. Name it with
+`_env_file=`, a supported argument despite the underscore (it comes from
+`pydantic-settings`). From the
+[`credentials_env_file` example](../examples/credentials_env_file.py):
+
+<!-- example: credentials_env_file.py#env-file -->
+```python
+session = connect(uri, GitHubConfig(_env_file=env_file))
+```
+
+Variables already set in the environment win over the file. Add `.env` to
+your `.gitignore` so credentials are never committed.
 
 ## Backends and the conformance suite
 
