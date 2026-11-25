@@ -450,11 +450,6 @@ def test_errors_never_include_the_token(api_url: str, fake: FakeGitHub) -> None:
     session.close()
 
 
-def test_missing_containers_are_not_found(session: GitHubSession) -> None:
-    with pytest.raises(NotFoundError, match="does not exist"):
-        session.list_records(LogicalPath(("Nope",)))
-
-
 # Regressions from review
 
 

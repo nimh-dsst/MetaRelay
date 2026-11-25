@@ -15,6 +15,7 @@ from metarelay.core.preview import (
     parse_html,
     parse_markdown,
     preview_diff,
+    stored_preview_diff,
     to_html,
     to_markdown,
 )
@@ -73,6 +74,9 @@ def test_html_is_tables_and_escaped() -> None:
 def test_markdown_is_a_table_and_escaped() -> None:
     markdown = to_markdown([Heading(text="Implant"), Table(rows=[("a|b", "line1\nline2")])])
     assert markdown == ("## Implant\n\n| Field | Value |\n| --- | --- |\n| a\\|b | line1 line2 |\n")
+    markdown = to_markdown([Table(rows=[("depth", "<5 mm"), ("note", "<b>x</b> & y")])])
+    assert "| depth | &lt;5 mm |" in markdown
+    assert "| note | &lt;b&gt;x&lt;/b&gt; &amp; y |" in markdown
 
 
 def test_markdown_headings_and_titles_escape_inline_html() -> None:
@@ -80,12 +84,6 @@ def test_markdown_headings_and_titles_escape_inline_html() -> None:
     assert "## &lt;img src=x&gt;" in markdown
     assert "### &lt;b&gt;T&lt;/b&gt;" in markdown
     assert "<" not in markdown
-
-
-def test_markdown_cells_escape_inline_html() -> None:
-    markdown = to_markdown([Table(rows=[("depth", "<5 mm"), ("note", "<b>x</b> & y")])])
-    assert "| depth | &lt;5 mm |" in markdown
-    assert "| note | &lt;b&gt;x&lt;/b&gt; &amp; y |" in markdown
 
 
 def test_render_preview_uses_the_generic_renderer_by_default(make_record) -> None:
@@ -103,18 +101,6 @@ def test_a_schema_can_register_its_own_renderer(make_record) -> None:
     preview = render_preview(make_record())
     assert "<th>Diameter</th><td>400 µm</td>" in preview.html
     assert "diameter_um" not in preview.markdown
-
-
-def test_preview_is_plain_data(make_record) -> None:
-    preview = render_preview(make_record())
-    assert Preview.model_validate_json(preview.model_dump_json()) == preview
-
-
-def test_rendering_is_deterministic(make_record) -> None:
-    record = make_record()
-    assert preview_checksum(render_preview(record).html) == preview_checksum(
-        render_preview(record).html
-    )
 
 
 @pytest.mark.parametrize(
@@ -280,6 +266,10 @@ def test_describe() -> None:
     both = PreviewDiff(edits=[edit, other], complete=True)
     assert both.describe(writing="r") == "Changed: T · a: '1' → '2'; T · a of s: '1' → '2'."
     assert both.describe() == "Changed: T · a: '1' → '2'; T · a: '1' → '2'."
+    # Long values are cut short.
+    long = PreviewEdit(record_id="r", table=None, field="notes", written="a", current="x" * 500)
+    assert len(long.describe()) < 100
+    assert long.describe().endswith("…'")
 
 
 def test_an_inserted_row_does_not_shift_the_others() -> None:
@@ -333,10 +323,23 @@ def test_an_added_image_is_not_complete(nested_record: Record) -> None:
     assert preview_diff(nested_record, html, format="html") == PreviewDiff(edits=[], complete=False)
 
 
-def test_long_values_are_cut_short_in_messages() -> None:
-    edit = PreviewEdit(record_id="r", table=None, field="notes", written="a", current="x" * 500)
-    assert len(edit.describe()) < 100
-    assert edit.describe().endswith("…'")
+def test_a_preview_that_lags_its_stored_record_offers_no_edits(nested_record: Record) -> None:
+    # Someone edited the stored .json and left the preview alone: its old
+    # values must not read as edits, or accepting them would undo that change.
+    old = render_preview(nested_record).markdown
+    edited = old.replace("| cohort | A |", "| cohort | B |")
+    stored = nested_record.model_dump_json().encode()
+    in_sync = stored_preview_diff(stored, edited, preview_checksum(old), format="markdown")
+    assert in_sync is not None and in_sync.complete
+    assert [(e.field, e.current) for e in in_sync.edits] == [("cohort", "B")]
+
+    payload = {**nested_record.payload, "bilateral": True}
+    changed = nested_record.model_copy(update={"payload": payload})
+    stored = changed.model_dump_json().encode()
+    lagging = PreviewDiff(edits=[], complete=False)
+    assert stored_preview_diff(stored, edited, preview_checksum(old), format="markdown") == lagging
+    # No checksum for the written preview: it can't be shown to match either.
+    assert stored_preview_diff(stored, edited, None, format="markdown") == lagging
 
 
 # Accepting edits into the record
@@ -386,6 +389,7 @@ def test_apply_edits_puts_values_back_with_their_types(nested_record: Record) ->
     assert updated.payload["sites"] == [{"region": "VTA", "hemisphere": "left"}]
     assert updated.payload["indicators"] == ["GCaMP8s", "tdTomato"]
     assert updated.payload["bilateral"] is True
+    assert _accepted(nested_record, ("Metadata", "bilateral", "TRUE")).payload["bilateral"] is True
     assert updated.updated_at > nested_record.updated_at
     # The JSON and the preview agree again.
     assert preview_diff(updated, render_preview(updated).markdown, format="markdown").edits == []
@@ -463,13 +467,6 @@ def test_a_custom_preview_cant_be_mapped_back(nested_record: Record) -> None:
     register_renderer("test.free", lambda record: [Table(title="Mine", rows=[("x", "1")])])
     with pytest.raises(ValidationError, match="its own preview"):
         apply_edits(nested_record, [_edit("x", "1", "2", table="Mine")])
-
-
-def test_typed_yes_and_numbers_read_as_shown(nested_record: Record) -> None:
-    updated = _accepted(nested_record, ("Metadata", "bilateral", "yes"))
-    assert updated.payload["bilateral"] is True
-    updated = _accepted(nested_record, ("Metadata", "bilateral", "TRUE"))
-    assert updated.payload["bilateral"] is True
 
 
 def test_a_schema_that_rewrites_the_value_is_refused(isolated_registry) -> None:

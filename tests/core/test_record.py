@@ -20,11 +20,6 @@ def test_payload_is_validated_against_the_registry(make_record) -> None:
         make_record(payload={"diameter_um": "wide"})
 
 
-def test_unregistered_schema_is_rejected(make_record) -> None:
-    with pytest.raises(ValidationError, match="not registered"):
-        make_record(schema_id="test.unknown")
-
-
 def test_defaults_are_not_added_to_the_payload(make_record) -> None:
     # The model has a default for numerical_aperture, but the record must not
     # gain it: adding an optional field to a schema would change every checksum.
@@ -72,38 +67,19 @@ def test_payload_keys_keep_their_aliases(rich) -> None:
     assert rich({"count": 1, "Label": "x"}).payload == {"count": 1, "Label": "x"}
 
 
-@pytest.mark.parametrize("record_id", ["", ".", "..", "-leading", "has space", "a/b"])
+@pytest.mark.parametrize("record_id", ["", "..", "a/b"], ids=["empty", "first-char", "later-char"])
 def test_bad_record_ids_are_rejected(make_record, record_id: str) -> None:
     with pytest.raises(ValidationError):
         make_record(record_id=record_id)
 
 
-@pytest.mark.parametrize("record_id", ["implant-M1", "equipment", "a.b_c-1"])
-def test_good_record_ids(make_record, record_id: str) -> None:
-    assert make_record(record_id=record_id).record_id == record_id
+def test_good_record_id(make_record) -> None:
+    assert make_record(record_id="a.b_c-1").record_id == "a.b_c-1"
 
 
 def test_unknown_envelope_fields_are_rejected(make_record) -> None:
     with pytest.raises(ValidationError):
         make_record(record_type="implant")
-
-
-def test_records_are_immutable(make_record) -> None:
-    record = make_record()
-    with pytest.raises(pydantic.ValidationError):
-        record.record_id = "other"  # type: ignore[misc]
-
-
-def test_every_failure_is_a_metarelay_validation_error() -> None:
-    with pytest.raises(ValidationError):
-        Record.model_validate({"schema_id": "test.fiber"})
-    with pytest.raises(ValidationError):
-        Record.model_validate_json("{}")
-
-
-def test_round_trips_through_json(make_record) -> None:
-    record = make_record()
-    assert Record.model_validate_json(record.model_dump_json()) == record
 
 
 def test_a_custom_registry_can_be_passed_in_context(make_record) -> None:

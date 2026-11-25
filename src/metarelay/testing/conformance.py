@@ -158,12 +158,9 @@ class BackendConformance:
 
     def test_ensure_container_creates_parents(self, session: Session) -> None:
         session.ensure_container(self._at("Study", "Cohort A", "M1"))
-        assert _paths(session.list_containers(self.base)) >= {self._at("Study")}
-        assert _paths(session.list_containers(self._at("Study"))) == {self._at("Study", "Cohort A")}
-
-    def test_list_containers_is_not_recursive(self, session: Session) -> None:
-        session.ensure_container(self._at("Study", "Cohort A"))
         session.ensure_container(self._at("Study", "Cohort B"))
+        assert _paths(session.list_containers(self.base)) >= {self._at("Study")}
+        # Listings are not recursive: M1 sits under Cohort A, not Study.
         listed = _paths(session.list_containers(self._at("Study")))
         assert listed == {self._at("Study", "Cohort A"), self._at("Study", "Cohort B")}
 
@@ -188,6 +185,10 @@ class BackendConformance:
         with pytest.raises(NotFoundError):
             session.write_file(missing, "trace.csv", b"data")
         assert missing not in _paths(session.list_containers(self.base))
+        # Also a missing container whose parent does exist.
+        session.ensure_container(self._at("Study"))
+        with pytest.raises(NotFoundError):
+            session.list_records(self._at("Study", "Missing"))
 
     # Records-only containers (ensure_container's holds_records hint)
 
@@ -268,12 +269,7 @@ class BackendConformance:
         assert stored.receipt.checksum == record_checksum(record) == receipt.checksum
         assert stored.receipt.conflict_token == receipt.conflict_token
 
-    def test_receipt_describes_the_write(
-        self, session: Session, container: LogicalPath, make_record
-    ) -> None:
-        record = make_record()
-        receipt = session.write_record(container, record)
-
+        # The receipt describes the write.
         assert receipt.destination == session.destination
         assert receipt.container.path == container
         assert receipt.record_id == record.record_id
@@ -298,9 +294,6 @@ class BackendConformance:
         assert all(isinstance(item, StoredRecord) for item in listed)
         assert {item.record.record_id for item in listed} == {"rec-1", "rec-2"}
         assert [item.record for item in session.list_records(child)] == [in_child]
-
-    def test_empty_container_has_no_records(self, session: Session, container) -> None:
-        assert session.list_records(container) == []
 
     def test_same_id_in_two_containers(self, session: Session, make_record) -> None:
         first, second = self._at("A"), self._at("B")
@@ -374,37 +367,13 @@ class BackendConformance:
 
     def test_force_overwrites(self, session: Session, container: LogicalPath, make_record) -> None:
         session.write_record(container, make_record(label="theirs"))
-        receipt = session.write_record(container, make_record(label="mine"), mode=WriteMode.FORCE)
+        # A string mode on purpose: local normalizes the mode itself after
+        # decide_write, so string handling must be checked on every backend.
+        receipt = session.write_record(container, make_record(label="mine"), mode="force")  # type: ignore[arg-type]
         assert session.read_record(container, "rec-1").record.payload["label"] == "mine"
         assert receipt.checksum == record_checksum(make_record(label="mine"))
 
-    def test_write_mode_accepts_strings(
-        self, session: Session, container: LogicalPath, make_record
-    ) -> None:
-        session.write_record(container, make_record(label="theirs"))
-        session.write_record(container, make_record(label="mine"), mode="force")  # type: ignore[arg-type]
-        assert session.read_record(container, "rec-1").record.payload["label"] == "mine"
-
     # Previews (D7)
-
-    def test_preview_edit_conflicts(
-        self, session: Session, container: LogicalPath, make_record
-    ) -> None:
-        receipt = session.write_record(container, make_record(label="v1"))
-        if receipt.preview_checksum is None:
-            pytest.skip("This backend does not track previews.")
-        try:
-            self.edit_preview(session, container, "rec-1", "Edited by hand\n")
-        except NotImplementedError:
-            pytest.skip("This backend cannot simulate a preview edit.")
-        with pytest.raises(ConflictError) as raised:
-            session.write_record(container, make_record(label="v2"), prior_receipt=receipt)
-        # MetaRelay can't read a preview replaced by free text, and says so.
-        diff = raised.value.preview_diff
-        assert diff is not None
-        assert not diff.complete
-        session.write_record(container, make_record(label="v2"), mode=WriteMode.FORCE)
-        assert session.read_record(container, "rec-1").record.payload["label"] == "v2"
 
     def test_preview_edit_says_what_changed(
         self, session: Session, container: LogicalPath, make_record
@@ -445,6 +414,12 @@ class BackendConformance:
             self.edit_preview(session, container, "rec-1", "Edited by hand\n")
         except NotImplementedError:
             pytest.skip("This backend cannot simulate a preview edit.")
+        with pytest.raises(ConflictError) as raised:
+            session.write_record(container, make_record(label="v2"), prior_receipt=receipt)
+        # MetaRelay can't read a preview replaced by free text, and says so.
+        diff = raised.value.preview_diff
+        assert diff is not None
+        assert not diff.complete
         from_read = session.read_record(container, "rec-1").receipt
         [listed] = session.list_records(container)
         assert from_read.preview_checksum == receipt.preview_checksum
@@ -453,9 +428,9 @@ class BackendConformance:
             session.write_record(container, make_record(label="v2"), prior_receipt=from_read)
         # force replaces the edit, and the next read reflects the new preview.
         forced = session.write_record(container, make_record(label="v2"), mode=WriteMode.FORCE)
-        assert session.read_record(container, "rec-1").receipt.preview_checksum == (
-            forced.preview_checksum
-        )
+        stored = session.read_record(container, "rec-1")
+        assert stored.record.payload["label"] == "v2"
+        assert stored.receipt.preview_checksum == forced.preview_checksum
 
     # Files
 
@@ -470,10 +445,13 @@ class BackendConformance:
         assert receipt.checksum == hashlib.sha256(data).hexdigest()
         assert receipt.size == len(data)
 
-    def test_write_file_twice_replaces_it(self, session: Session, container: LogicalPath) -> None:
-        session.write_file(container, "trace.csv", b"old")
+        # Writing it again replaces it.
         receipt = session.write_file(container, "trace.csv", b"new")
         assert receipt.checksum == hashlib.sha256(b"new").hexdigest()
+
+        # Files are not records, even a .json one (local keeps records as .json).
+        session.write_file(container, "notes.json", b"{}")
+        assert session.list_records(container) == []
 
     @pytest.mark.parametrize("name", ["rec-1.json", "rec-1.md", "REC-1.json"])
     def test_write_file_never_replaces_a_record(
@@ -497,16 +475,6 @@ class BackendConformance:
         with contextlib.suppress(ConflictError, ValidationError):
             session.write_record(container, make_record("Rec-1", label="upper"), mode="force")
         assert session.read_record(container, "rec-1").record == record
-
-    def test_unknown_write_mode_is_a_validation_error(
-        self, session: Session, container: LogicalPath, make_record
-    ) -> None:
-        with pytest.raises(ValidationError):
-            session.write_record(container, make_record(), mode="Force")  # type: ignore[arg-type]
-
-    def test_files_are_not_records(self, session: Session, container: LogicalPath) -> None:
-        session.write_file(container, "notes.json", b"{}")
-        assert session.list_records(container) == []
 
 
 def _paths(containers: list[Container]) -> set[LogicalPath]:

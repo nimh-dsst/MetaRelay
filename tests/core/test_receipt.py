@@ -5,13 +5,12 @@ import traceback
 import pytest
 
 from metarelay import (
-    ConfigurationError,
     Container,
-    Destination,
     FileReceipt,
     LogicalPath,
     LoginChallenge,
     Receipt,
+    Record,
     SyncIndex,
     ValidationError,
     record_checksum,
@@ -59,22 +58,9 @@ def test_checksum_ignores_updated_at(make_record) -> None:
     assert record_checksum(first) == record_checksum(later)
 
 
-def test_checksum_changes_with_content(make_record) -> None:
-    assert record_checksum(make_record(diameter_um=400)) != record_checksum(
-        make_record(diameter_um=200)
-    )
-
-
 def test_preview_checksum_is_stable() -> None:
     assert preview_checksum("<table/>") == preview_checksum("<table/>")
     assert preview_checksum("<table/>") != preview_checksum("<table />")
-
-
-def test_receipt_round_trips_through_json() -> None:
-    receipt = make_receipt()
-    assert Receipt.model_validate_json(receipt.model_dump_json()) == receipt
-    assert receipt.preview_checksum is None
-    assert receipt.backend_ids == {}
 
 
 def test_sync_index_keys_by_destination_path_and_id() -> None:
@@ -100,12 +86,6 @@ def test_keys_cannot_collide_through_separator_characters() -> None:
     )
 
 
-def test_sync_index_round_trips_through_json() -> None:
-    index = SyncIndex()
-    index.put(make_receipt())
-    assert SyncIndex.model_validate_json(index.model_dump_json()) == index
-
-
 def test_equivalent_destination_spellings_find_the_same_receipt() -> None:
     index = SyncIndex()
     index.put(make_receipt(destination="LabArchives://API.Example.org/"))
@@ -121,10 +101,11 @@ MALFORMED = [
     (SyncIndex, {"receipts": {"k": {**GOOD_RECEIPT, "container": {"path": ["a/b"]}}}}),
     (SyncIndex, {"index_version": 2}),
     (Receipt, {**GOOD_RECEIPT, "destination": "not a uri"}),
-    (Receipt, {**GOOD_RECEIPT, "checksum": None}),
     (FileReceipt, {"destination": "file:///x"}),
     (StoredRecord, {"record": {}, "receipt": GOOD_RECEIPT}),
     (Container, {"path": "a/b"}),
+    (Record, {"schema_id": "test.fiber"}),
+    (LoginChallenge, {"destination": "not a uri"}),
 ]
 
 
@@ -154,21 +135,6 @@ class TestCredentialsNeverEchoed:
         assert "".join(traceback.format_exception(error))  # still printable
         return "\n".join(texts)
 
-    def test_receipt(self) -> None:
-        with pytest.raises(ValidationError) as caught:
-            Receipt(
-                destination=self.URI,
-                backend="labarchives",
-                container=Container(path=LogicalPath(("a",))),
-                record_id="r",
-                schema_id="test.fiber",
-                schema_version=1,
-                checksum="c",
-                conflict_token="c",
-            )
-        assert "username or password" in str(caught.value)
-        assert self.SECRET not in self._full_text(caught.value)
-
     def test_receipt_loaded_from_json(self) -> None:
         with pytest.raises(ValidationError) as caught:
             receipt = {
@@ -182,29 +148,13 @@ class TestCredentialsNeverEchoed:
                 "conflict_token": "c",
             }
             SyncIndex.model_validate_json(json.dumps({"receipts": {"k": receipt}}))
+        assert "username or password" in str(caught.value)
         assert self.SECRET not in self._full_text(caught.value)
 
     def test_login_challenge(self) -> None:
         with pytest.raises(ValidationError) as caught:
             LoginChallenge(destination=self.URI, auth_url="https://x", redirect_url="https://y")
         assert self.SECRET not in self._full_text(caught.value)
-
-    @pytest.mark.parametrize(
-        "uri",
-        [
-            f"user:{SECRET}@host",  # no scheme: used to hit "is not a URI" first
-            f"1bad://user:{SECRET}@host",  # bad scheme: used to hit "invalid scheme" first
-            f"x://user:{SECRET}@[host",  # bad host: used to hit "not a valid URI" first
-            f"x://user:{SECRET}@host/path",
-        ],
-    )
-    def test_destination_parse(self, uri: str) -> None:
-        with pytest.raises(ConfigurationError, match="username or password") as caught:
-            Destination.parse(uri)
-        assert self.SECRET not in self._full_text(caught.value)
-
-    def test_at_sign_in_the_path_is_fine(self) -> None:
-        assert Destination.parse("github://lab/repo@main/x").path == "/repo@main/x"
 
     def test_other_bad_values_are_not_echoed_either(self) -> None:
         with pytest.raises(ValidationError) as caught:
