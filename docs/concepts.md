@@ -196,6 +196,8 @@ already exist.
 - Every `.json` in a container is a record, except files written with
   `write_file`. A `.json` that isn't a valid record makes listing fail with
   an error naming the file, rather than the record silently disappearing.
+  So give MetaRelay its own folder, not one where an app keeps other `.json`
+  files.
 - The same folder always gets the same destination URI (`lab data` and
   `lab%20data`, or a symlinked path, are one destination), so receipts match.
 - `create` is enforced even with two writers. Other modes assume one writer

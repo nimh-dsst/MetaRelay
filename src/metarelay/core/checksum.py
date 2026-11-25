@@ -7,7 +7,8 @@ was formatted on disk.
 The recipe matches, but the fields hashed do not (``schema_id`` replaces
 Chronoxiv's ``record_type``, and the NDX version is no longer in the
 envelope). Checksums in existing Chronoxiv receipts therefore do not match
-these, and migrated receipts need a verify-then-upgrade step.
+these. Chronoxiv checks its old checksums when it migrates its records;
+MetaRelay does not.
 """
 
 from __future__ import annotations
